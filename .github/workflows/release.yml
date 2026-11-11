@@ -1,0 +1,98 @@
+name: Release
+
+# Publishing a tag such as `v1.0.0` builds the unsigned Windows installer and
+# attaches the files the in-app updater expects to a GitHub Release:
+#
+#   SkipNet_x64.exe            ← downloaded by the self-updater
+#   SkipNet_x64.exe.blockmap
+#   SkipNet_x64-portable.7z
+#   latest.yml
+#   SHA256SUMS.txt             ← checksums for the files above
+#
+# Keep the tag and package.json version in sync; the workflow refuses to
+# publish a release when they differ.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify tag matches package.json
+        shell: pwsh
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $tag = "${{ github.ref_name }}".TrimStart('v')
+          if ($version -ne $tag) {
+            Write-Error "Tag v$tag does not match package.json version $version"
+            exit 1
+          }
+          Write-Host "Building SkipNet $version"
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Build unsigned Windows artifacts
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: pnpm build:win
+
+      - name: Verify release assets
+        shell: pwsh
+        run: |
+          $required = @(
+            'dist/SkipNet_x64.exe',
+            'dist/SkipNet_x64.exe.blockmap',
+            'dist/SkipNet_x64-portable.7z',
+            'dist/latest.yml',
+            'dist/SHA256SUMS.txt'
+          )
+          $missing = $required | Where-Object { -not (Test-Path $_) }
+          if ($missing) {
+            Write-Error "Missing release assets: $($missing -join ', ')"
+            exit 1
+          }
+          Get-ChildItem dist -File | Select-Object Name, Length
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: SkipNet ${{ github.ref_name }}
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+          fail_on_unmatched_files: true
+          files: |
+            dist/SkipNet_x64.exe
+            dist/SkipNet_x64.exe.blockmap
+            dist/SkipNet_x64-portable.7z
+            dist/latest.yml
+            dist/SHA256SUMS.txt

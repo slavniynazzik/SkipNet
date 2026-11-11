@@ -1,0 +1,142 @@
+appId: com.skipnet.app
+productName: SkipNet
+# Trim Chromium's locale pack from ~42 MB (55 files) to ~1.5 MB by shipping
+# only the languages the SkipNet UI actually uses. The renderer is fully
+# Russian; en-US stays as a fallback for system-level Chromium prompts
+# (form validation, default context-menu strings) when ru is unavailable.
+electronLanguages:
+  - en-US
+  - ru
+directories:
+  buildResources: build
+files:
+  - '!**/.vscode/*'
+  - '!src/*'
+  - '!aur/*'
+  - '!images/*'
+  - '!scripts/*'
+  - '!extra/*'
+  - '!tailwind.config.js'
+  - '!postcss.config.js'
+  - '!electron.vite.config.{js,ts,mjs,cjs}'
+  - '!{.eslintignore,.eslintrc.cjs,.prettierignore,.prettierrc.yaml,dev-app-update.yml,CHANGELOG.md,README.md}'
+  - '!{.env,.env.*,.npmrc,pnpm-lock.yaml}'
+  - '!{tsconfig.json,tsconfig.node.json,tsconfig.web.json}'
+  # `resources/` is shipped via `extraResources` (see below) into the app's
+  # resources root. Without this exclusion electron-builder would ALSO pack the
+  # whole ~17 MB zapret/TgWsProxy tree inside app.asar, doubling the installer
+  # size and leaving an unused copy the app never reads.
+  - '!resources/**'
+  # Local per-version release archive (scripts/archive-release.mjs) holds the
+  # full installer next to the build output. Never pack it into app.asar.
+  - '!releases/**'
+  # Screenshot used only by README.md - pure dead weight in the package.
+  - '!docs/**'
+  # Build/dev logs must never be packed. They are written while the build is
+  # running, so a growing file would desynchronise asar offsets and produce a
+  # package that exits immediately on launch.
+  - '!*.log'
+  - '!**/*.log'
+  # Developer-only files: lint config, shadcn metadata, pnpm patch sources
+  # and the build/dev helper batches are never read at runtime.
+  - '!{build.bat,dev.bat,components.json,eslint.config.cjs}'
+  - '!patches/**'
+# License/attribution files must be visible next to SkipNet.exe, not buried
+# inside app.asar, so users can read them without unpacking the archive.
+# (They are also packed into app.asar by the `files` defaults above.)
+extraFiles:
+  - LICENSE
+  - COPYRIGHT
+  - THIRD-PARTY-NOTICES.md
+extraResources:
+  # SkipNet runtime assets only — everything we actually need at runtime
+  # lives under ./resources (zapret strategies, tray icons, TgWsProxy,
+  # winws.exe, WinDivert, ...). No proxy core (mihomo) is bundled because
+  # SkipNet doesn't run one — that would just bloat the installer.
+  - from: './resources/'
+    to: ''
+    filter:
+      - '**/*'
+      - '!**/.git/**'
+      - '!**/.github/**'
+      - '!**/.service/**'
+      - '!**/.gitignore'
+      - '!**/.gitattributes'
+      - '!**/README.md'
+      # LICENSE.txt files are intentionally kept: the bundled Zapret and
+      # TgWsProxy binaries are third-party works whose licenses require the
+      # copyright notice + license text to ship with the binary.
+      # Drop ~600 KB of zapret cruft that the app never touches at runtime:
+      # *.backup files (e.g. ipset-all.txt.backup, 538 KB) are leftovers from
+      # upstream maintainer commits, and zapret/utils/ holds an interactive
+      # PowerShell test-suite + targets list used only when running the
+      # standalone `service.bat` menu manually. SkipNet spawns winws.exe
+      # directly, so none of this ships value to end users.
+      - '!**/*.backup'
+      - '!**/zapret/utils/**'
+protocols:
+  name: 'SkipNet URI Scheme'
+  schemes:
+    # SkipNet registers two custom protocols at runtime via
+    # `app.setAsDefaultProtocolClient` (see src/main/utils/init.ts).
+    # Keep this list in sync with that file.
+    - 'skipnet'
+    - 'tg-ws'
+win:
+  target:
+    - nsis
+    - 7z
+  artifactName: ${productName}_${arch}-portable.${ext}
+  # Embed an UAC manifest in SkipNet.exe so Windows always prompts for
+  # admin elevation when launched. Required because zapret's winws.exe
+  # opens WinDivert which needs SYSTEM-level packet capture rights;
+  # without elevation on the parent we'd UAC-prompt on every Zapret toggle.
+  requestedExecutionLevel: requireAdministrator
+nsis:
+  artifactName: ${productName}_${arch}.${ext}
+  uninstallDisplayName: ${productName}
+  allowToChangeInstallationDirectory: true
+  oneClick: false
+  perMachine: true
+  createDesktopShortcut: true
+  include: build/nsis/installer.nsh
+mac:
+  target:
+    - pkg
+  hardenedRuntime: true
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+  notarize: false
+  extendInfo:
+    - NSCameraUsageDescription: Application requests access to the device's camera.
+    - NSMicrophoneUsageDescription: Application requests access to the device's microphone.
+    - NSDocumentsFolderUsageDescription: Application requests access to the user's Documents folder.
+    - NSDownloadsFolderUsageDescription: Application requests access to the user's Downloads folder.
+  artifactName: ${productName}_${arch}.${ext}
+pkg:
+  allowAnywhere: false
+  allowCurrentUserHome: false
+  # background:
+  #   alignment: bottomleft
+  #   file: build/background.png
+linux:
+  desktop:
+    entry:
+      Name: SkipNet
+      MimeType: 'x-scheme-handler/skipnet;x-scheme-handler/tg-ws'
+  target:
+    - deb
+    - rpm
+    - pacman
+  maintainer: slavniynazzik
+  category: Utility
+  artifactName: ${productName}_${arch}.${ext}
+deb:
+  afterInstall: 'build/linux/postinst'
+rpm:
+  afterInstall: 'build/linux/postinst'
+pacman:
+  afterInstall: 'build/linux/postinst'
+  artifactName: ${productName}_${arch}.pkg.tar.xz
+npmRebuild: true
+publish: []

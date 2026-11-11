@@ -1,0 +1,26 @@
+node_modules
+resources/files
+resources/sidecar
+extra
+dist
+out
+# Per-version release archive (~190 MB each) — kept locally, published as
+# separate GitHub Releases instead of being committed.
+releases
+.DS_Store
+*.log*
+.idea
+*.ttf
+.serena
+.zed
+*.tsbuildinfo
+latest.yml
+.env.vs
+.vs/*
+!.vs/launch.vs.json
+!.vs/tasks.vs.json
+*.njsproj.user
+*.suo
+
+# PyInstaller intermediates
+.pyi-build/
