@@ -20,10 +20,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Version comes from package.json "packageManager"; passing it here too
+      # makes pnpm/action-setup v4 fail with a duplicate-version error.
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
-        with:
-          version: 10.33.0
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
