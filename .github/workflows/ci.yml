@@ -39,3 +39,19 @@ jobs:
 
       - name: Lint
         run: pnpm exec eslint . --ext .js,.jsx,.cjs,.mjs,.ts,.tsx,.cts,.mts
+
+      # A stray NUL byte (e.g. a UTF-16 fragment appended to a UTF-8 file)
+      # makes GitHub treat the file as binary and render the whole README as
+      # escaped plain text. Fail fast instead of shipping a broken page.
+      - name: Check Markdown files are clean UTF-8
+        shell: pwsh
+        run: |
+          $bad = @(git ls-files '*.md' | Where-Object {
+            (Test-Path $_) -and ([System.IO.File]::ReadAllBytes($_) -contains 0)
+          })
+          if ($bad.Count -gt 0) {
+            $bad | ForEach-Object { Write-Host "NUL bytes: $_" }
+            Write-Error 'Markdown files contain NUL bytes and will not render on GitHub'
+            exit 1
+          }
+          Write-Host "Markdown files are clean ($((git ls-files '*.md').Count) checked)"
