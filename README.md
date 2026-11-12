@@ -349,8 +349,9 @@ releases/
 ### Публикация релиза
 
 1. Выпустите новую версию: `pnpm release` (или `pnpm version:bump`, затем `pnpm build:win`).
-2. Закоммитьте изменения и отправьте тег с новым номером: `git tag v1.0.1` и `git push origin v1.0.1`.
-3. GitHub Actions (`.github/workflows/release.yml`) соберёт неподписанный установщик и прикрепит к релизу `SkipNet_x64.exe`, `SkipNet_x64.exe.blockmap`, `SkipNet_x64-portable.7z`, `latest.yml` и `SHA256SUMS.txt`.
+2. Добавьте краткую сводку изменений в **`CHANGELOG.md`** в раздел `## <версия>` — она попадёт в описание GitHub-релиза и в окно обновления SkipNet.
+3. Закоммитьте изменения и отправьте тег с новым номером: `git tag v1.0.1` и `git push origin v1.0.1`.
+4. GitHub Actions (`.github/workflows/release.yml`) соберёт неподписанный установщик и прикрепит к релизу `SkipNet_x64.exe`, `SkipNet_x64.exe.blockmap`, `SkipNet_x64-portable.7z`, `latest.yml` и `SHA256SUMS.txt`. Описание релиза берётся из `CHANGELOG.md`; без раздела для этой версии workflow остановится.
 
 Тег должен совпадать с версией в `package.json` без префикса `v`, иначе workflow остановится. Самообновление читает последний опубликованный релиз через GitHub API и скачивает именно `SkipNet_x64.exe`; каждая версия остаётся доступной в своём релизе навсегда.
 
