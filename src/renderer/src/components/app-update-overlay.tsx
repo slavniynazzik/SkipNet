@@ -47,7 +47,7 @@ export default function AppUpdateOverlay(): React.ReactElement | null {
     setInstalling(true)
     setError(null)
     try {
-      await appInstallUpdate(info.assetUrl, info.latest)
+      await appInstallUpdate(info.assetUrl, info.latest, info.assetDigest, info.assetSize)
       // Main process will quit SkipNet within ~1 s. We just keep the
       // spinner up; user perceives "downloading… closing…".
     } catch (e) {

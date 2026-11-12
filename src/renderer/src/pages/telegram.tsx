@@ -34,7 +34,28 @@ const TelegramPage: React.FC = () => {
   const status = useTgwsStore((s) => s.status)
   const { appConfig, patchAppConfig } = useAppConfig()
   const [link, setLink] = useState('')
+  const [portDraft, setPortDraft] = useState('')
   const tgws = appConfig?.tgws
+
+  // Keep a local text draft for the port field so the input can be cleared
+  // while retyping. The old handler wrote `Number('') || 1443` on every
+  // keystroke, making the field impossible to empty and persisting invalid
+  // intermediate ports.
+  useEffect(() => {
+    setPortDraft(String(tgws?.port ?? 1443))
+  }, [tgws?.port])
+
+  const commitPort = (): void => {
+    const parsed = Number(portDraft)
+    if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65535) {
+      setPortDraft(String(tgws?.port ?? 1443))
+      return
+    }
+    setPortDraft(String(parsed))
+    if (parsed !== (tgws?.port ?? 1443)) {
+      void patchAppConfig({ tgws: { ...tgws!, port: parsed } })
+    }
+  }
 
   useEffect(() => {
     tgwsGetLink().then(setLink).catch(() => setLink(''))
@@ -61,7 +82,12 @@ const TelegramPage: React.FC = () => {
       description: updateInfo.assetName ?? `v${updateInfo.latest}`
     })
     try {
-      const res = await tgwsInstallUpdate(updateInfo.assetUrl, updateInfo.latest)
+      const res = await tgwsInstallUpdate(
+        updateInfo.assetUrl,
+        updateInfo.latest,
+        updateInfo.assetDigest,
+        updateInfo.assetSize
+      )
       const mb = (res.sizeBytes / (1024 * 1024)).toFixed(1)
       toast.success('TgWsProxy обновлён', {
         id: tId,
@@ -290,10 +316,14 @@ const TelegramPage: React.FC = () => {
             <Label>Порт</Label>
             <Input
               type="number"
-              value={tgws?.port ?? 1443}
-              onChange={(e) =>
-                patchAppConfig({ tgws: { ...tgws!, port: Number(e.target.value) || 1443 } })
-              }
+              value={portDraft}
+              onChange={(e) => setPortDraft(e.target.value)}
+              onBlur={commitPort}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') e.currentTarget.blur()
+              }}
+              min={1}
+              max={65535}
             />
           </div>
           <div className="md:col-span-2 space-y-1.5">

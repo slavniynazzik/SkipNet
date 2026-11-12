@@ -1,5 +1,6 @@
-import { existsSync, mkdirSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, writeFileSync, unlinkSync } from 'fs'
 import { spawn } from 'child_process'
+import { createHash } from 'crypto'
 import path from 'path'
 import { app } from 'electron'
 import { dataDir } from '../utils/dirs'
@@ -39,6 +40,8 @@ export interface AppUpdateInfo {
   assetName?: string
   assetUrl?: string
   assetSize?: number
+  /** GitHub's `sha256:<hex>` digest of the release asset, when published. */
+  assetDigest?: string
   releaseUrl?: string
   releaseNotes?: string
   publishedAt?: string
@@ -49,6 +52,7 @@ interface GhAsset {
   name: string
   browser_download_url: string
   size: number
+  digest?: string | null
 }
 interface GhRelease {
   tag_name?: string
@@ -176,6 +180,7 @@ export async function checkAppUpdate(force = false): Promise<AppUpdateInfo> {
     assetName: installerAsset?.name,
     assetUrl: installerAsset?.browser_download_url,
     assetSize: installerAsset?.size,
+    assetDigest: installerAsset?.digest ?? undefined,
     releaseUrl: release.html_url,
     releaseNotes: release.body?.trim() || undefined,
     publishedAt: release.published_at,
@@ -222,6 +227,27 @@ function writeUpgradeMarker(): void {
 }
 
 /**
+ * Validate the downloaded installer against the release metadata before it is
+ * ever written to disk and executed. Installers historically came through
+ * third-party GitHub mirrors, so the bytes must not be trusted blindly.
+ */
+function verifyInstaller(buf: Buffer, expectedDigest?: string, expectedSize?: number): void {
+  if (expectedSize && expectedSize > 0 && buf.length !== expectedSize) {
+    throw new Error(
+      `Размер установщика не совпадает: получено ${buf.length} байт, ожидалось ${expectedSize}`
+    )
+  }
+  const digest = expectedDigest?.trim()
+  if (!digest) return
+  const match = /^sha256:([0-9a-f]{64})$/i.exec(digest)
+  if (!match) return
+  const actual = createHash('sha256').update(buf).digest('hex')
+  if (actual !== match[1].toLowerCase()) {
+    throw new Error('Контрольная сумма установщика не совпадает — загрузка отклонена')
+  }
+}
+
+/**
  * Download the installer and launch it in silent mode, then quit SkipNet
  * so NSIS can replace the on-disk files. The installer auto-relaunches the
  * new SkipNet when it's done; the user perceives the upgrade as ~5–10 s
@@ -229,7 +255,9 @@ function writeUpgradeMarker(): void {
  */
 export async function installAppUpdate(
   assetUrl: string,
-  expectedVersion?: string
+  expectedVersion?: string,
+  expectedDigest?: string,
+  expectedSize?: number
 ): Promise<{ scheduled: true }> {
   if (!assetUrl) throw new Error('Пустая ссылка на установщик')
   if (process.platform !== 'win32') {
@@ -263,6 +291,11 @@ export async function installAppUpdate(
     throw new Error(`Загруженный файл слишком маленький (${buf.length} байт)`)
   }
 
+  // Verify integrity against the signed release metadata (GitHub computes the
+  // `sha256:` digest server-side). A mirror cannot forge it without also
+  // compromising the API response.
+  verifyInstaller(buf, expectedDigest, expectedSize)
+
   // Write the installer to %TEMP% so it's auto-cleaned by Windows. Using
   // a stable name plus a timestamp keeps concurrent retries (rare) from
   // colliding while leaving older copies for Disk Cleanup to remove.
@@ -284,14 +317,34 @@ export async function installAppUpdate(
     }
   }
 
-  // Spawn detached so the installer survives our app.quit().
+  // Spawn detached so the installer survives our app.quit(). Wait for the
+  // actual spawn outcome before shutting down: if the installer cannot be
+  // started (AV block, deleted file, EACCES) the app used to quit anyway,
+  // leaving nothing installing and nothing running.
   const child = spawn(installerPath, ['/S', '--updated'], {
     detached: true,
     stdio: 'ignore',
     windowsHide: true
   })
-  child.on('error', (e) => console.error('[app-updater] installer spawn error:', e))
-  const installerPid = child.pid
+
+  let installerPid: number | undefined
+  try {
+    await new Promise<void>((resolve, reject) => {
+      child.once('spawn', () => resolve())
+      child.once('error', (e) => reject(e))
+    })
+    installerPid = child.pid
+  } catch (e) {
+    try {
+      unlinkSync(installerPath)
+    } catch {
+      /* noop — temp file, Windows will clean it eventually */
+    }
+    throw new Error(
+      `Не удалось запустить установщик: ${e instanceof Error ? e.message : String(e)}`
+    )
+  }
+  child.on('error', (e) => console.error('[app-updater] installer error:', e))
   child.unref()
 
   // Re-launch watcher. With `oneClick: false` (assisted installer) the

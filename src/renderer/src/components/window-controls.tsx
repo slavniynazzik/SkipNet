@@ -38,8 +38,10 @@ const WindowControls: React.FC = () => {
     e.currentTarget.blur()
     window.electron.ipcRenderer.invoke('windowMinimize')
   }
-  const handleMaximize = (): void => {
-    window.electron.ipcRenderer.invoke('windowMaximize')
+  const handleMaximize = async (): Promise<void> => {
+    await window.electron.ipcRenderer.invoke('windowMaximize')
+    const maximized = await window.electron.ipcRenderer.invoke('windowIsMaximized')
+    setIsMaximized(Boolean(maximized))
   }
   const handleClose = (e: React.MouseEvent<HTMLButtonElement>): void => {
     setSuppressHover('close')

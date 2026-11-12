@@ -303,6 +303,20 @@ export async function createWindow(appConfig?: AppConfig): Promise<void> {
   mainWindow.on('restore', () => onWindowVisibilityChange('restore'))
   mainWindow.on('focus', () => onWindowVisibilityChange('focus'))
   mainWindow.on('blur', () => onWindowVisibilityChange('blur'))
+  mainWindow.on('maximize', () => {
+    try {
+      mainWindow?.webContents.send('window-maximized')
+    } catch {
+      /* noop */
+    }
+  })
+  mainWindow.on('unmaximize', () => {
+    try {
+      mainWindow?.webContents.send('window-unmaximized')
+    } catch {
+      /* noop */
+    }
+  })
 
   mainWindow.webContents.setWindowOpenHandler((details) => {
     shell.openExternal(details.url)

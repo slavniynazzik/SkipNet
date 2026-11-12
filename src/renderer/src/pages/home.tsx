@@ -301,7 +301,15 @@ const Home: React.FC = () => {
         })
         return
       }
-      await Promise.allSettled(tasks)
+      const results = await Promise.allSettled(tasks)
+      const failed = results.find((r): r is PromiseRejectedResult => r.status === 'rejected')
+      if (failed) {
+        toast.error('Не удалось перезагрузить процессы', {
+          description:
+            failed.reason instanceof Error ? failed.reason.message : String(failed.reason)
+        })
+        return
+      }
       // Mirror the green radial-gradient look of the active power buttons so
       // the success toast reads as "everything is on" at a glance.
       toast.success('Процессы перезагружены', {

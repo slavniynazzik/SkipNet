@@ -2,6 +2,7 @@ import { installZapretBundle } from './zapret'
 import { getAppConfig, patchAppConfig } from '../config'
 import { loadUpdateCache, saveUpdateCache } from '../utils/update-cache'
 import { fetchGithub } from '../utils/github'
+import { createHash } from 'crypto'
 
 const REPO = 'Flowseal/zapret-discord-youtube'
 const RELEASES_LATEST_URL = `https://api.github.com/repos/${REPO}/releases/latest`
@@ -17,6 +18,7 @@ export interface ZapretUpdateInfo {
   assetName?: string
   assetUrl?: string
   assetSize?: number
+  assetDigest?: string
   releaseUrl?: string
   publishedAt?: string
   // True when the current `latest` tag matches the one the user previously
@@ -57,6 +59,7 @@ interface GhAsset {
   name: string
   browser_download_url: string
   size: number
+  digest?: string | null
 }
 interface GhRelease {
   tag_name?: string
@@ -148,6 +151,7 @@ export async function checkZapretUpdate(force = false): Promise<ZapretUpdateInfo
     assetName: zipAsset?.name,
     assetUrl: zipAsset?.browser_download_url,
     assetSize: zipAsset?.size,
+    assetDigest: zipAsset?.digest ?? undefined,
     releaseUrl: release.html_url,
     publishedAt: release.published_at,
     dismissed: !!latest && dismissedTag === latest
@@ -160,7 +164,9 @@ export async function checkZapretUpdate(force = false): Promise<ZapretUpdateInfo
 
 export async function installZapretUpdate(
   assetUrl: string,
-  expectedVersion?: string
+  expectedVersion?: string,
+  expectedDigest?: string,
+  expectedSize?: number
 ): Promise<{ strategies: number; installedVersion?: string }> {
   if (!assetUrl) throw new Error('Пустая ссылка на архив')
 
@@ -175,6 +181,19 @@ export async function installZapretUpdate(
     buf = Buffer.from(ab)
   } catch (e) {
     throw new Error(`Не удалось скачать архив: ${e instanceof Error ? e.message : String(e)}`)
+  }
+
+  if (expectedSize && expectedSize > 0 && buf.length !== expectedSize) {
+    throw new Error(
+      `Размер архива не совпадает: получено ${buf.length} байт, ожидалось ${expectedSize}`
+    )
+  }
+  const digestMatch = /^sha256:([0-9a-f]{64})$/i.exec(expectedDigest?.trim() ?? '')
+  if (digestMatch) {
+    const actual = createHash('sha256').update(buf).digest('hex')
+    if (actual !== digestMatch[1].toLowerCase()) {
+      throw new Error('Контрольная сумма архива не совпадает — загрузка отклонена')
+    }
   }
 
   const result = await installZapretBundle(new Uint8Array(buf))

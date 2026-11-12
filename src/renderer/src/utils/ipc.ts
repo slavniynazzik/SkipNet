@@ -42,6 +42,7 @@ export interface TgwsUpdateInfo {
   assetName?: string
   assetUrl?: string
   assetSize?: number
+  assetDigest?: string
   releaseUrl?: string
   publishedAt?: string
   dismissed?: boolean
@@ -50,9 +51,11 @@ export const tgwsCheckUpdate = (force = false): Promise<TgwsUpdateInfo> =>
   invoke('tgws:checkUpdate', force)
 export const tgwsInstallUpdate = (
   url: string,
-  expectedVersion?: string
+  expectedVersion?: string,
+  expectedDigest?: string,
+  expectedSize?: number
 ): Promise<{ installedVersion?: string; sizeBytes: number }> =>
-  invoke('tgws:installUpdate', url, expectedVersion)
+  invoke('tgws:installUpdate', url, expectedVersion, expectedDigest, expectedSize)
 export const tgwsDismissUpdate = (tag: string): Promise<void> =>
   invoke('tgws:dismissUpdate', tag)
 
@@ -73,6 +76,7 @@ export interface ZapretUpdateInfo {
   assetName?: string
   assetUrl?: string
   assetSize?: number
+  assetDigest?: string
   releaseUrl?: string
   publishedAt?: string
   dismissed?: boolean
@@ -81,9 +85,11 @@ export const zapretCheckUpdate = (force = false): Promise<ZapretUpdateInfo> =>
   invoke('zapret:checkUpdate', force)
 export const zapretInstallUpdate = (
   url: string,
-  expectedVersion?: string
+  expectedVersion?: string,
+  expectedDigest?: string,
+  expectedSize?: number
 ): Promise<{ strategies: number; installedVersion?: string }> =>
-  invoke('zapret:installUpdate', url, expectedVersion)
+  invoke('zapret:installUpdate', url, expectedVersion, expectedDigest, expectedSize)
 export const zapretDismissUpdate = (tag: string): Promise<void> =>
   invoke('zapret:dismissUpdate', tag)
 
@@ -188,6 +194,7 @@ export interface AppUpdateInfo {
   assetName?: string
   assetUrl?: string
   assetSize?: number
+  assetDigest?: string
   releaseUrl?: string
   releaseNotes?: string
   publishedAt?: string
@@ -197,9 +204,11 @@ export const appCheckUpdate = (force = false): Promise<AppUpdateInfo> =>
   invoke('app:checkUpdate', force)
 export const appInstallUpdate = (
   url: string,
-  expectedVersion?: string
+  expectedVersion?: string,
+  expectedDigest?: string,
+  expectedSize?: number
 ): Promise<{ scheduled: true }> =>
-  invoke('app:installUpdate', url, expectedVersion)
+  invoke('app:installUpdate', url, expectedVersion, expectedDigest, expectedSize)
 export const appDismissUpdate = (tag: string): Promise<void> =>
   invoke('app:dismissUpdate', tag)
 

@@ -9,7 +9,7 @@
 } from './dirs'
 import { defaultConfig } from './template'
 import { stringifyYaml } from './yaml'
-import { mkdir, writeFile } from 'fs/promises'
+import { mkdir, writeFile, copyFile } from 'fs/promises'
 import { existsSync } from 'fs'
 import { spawn } from 'child_process'
 import path from 'path'
@@ -71,9 +71,23 @@ async function initDirs(): Promise<void> {
 }
 
 async function initConfig(): Promise<void> {
-  if (!existsSync(appConfigPath())) {
-    await writeFile(appConfigPath(), stringifyYaml(defaultConfig))
+  const configPath = appConfigPath()
+  if (existsSync(configPath)) return
+
+  // The primary config vanished (crash between unlink/rename in older builds,
+  // an over-eager cleaner or Antivirus quarantine). Restore the last
+  // known-good backup instead of silently replacing all user settings with
+  // the defaults.
+  const backupPath = `${configPath}.backup`
+  if (existsSync(backupPath)) {
+    try {
+      await copyFile(backupPath, configPath)
+      return
+    } catch {
+      /* fall through to defaults */
+    }
   }
+  await writeFile(configPath, stringifyYaml(defaultConfig))
 }
 
 function initDeeplink(): void {

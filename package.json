@@ -1,6 +1,6 @@
 {
   "name": "skipnet",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "SkipNet — Telegram WS proxy and DPI bypass for Windows",
   "main": "./out/main/index.js",
   "author": "slavniynazzik",

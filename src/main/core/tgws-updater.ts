@@ -1,6 +1,7 @@
-import { existsSync, mkdirSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, writeFileSync, renameSync, unlinkSync } from 'fs'
 import path from 'path'
 import { spawn } from 'child_process'
+import { createHash } from 'crypto'
 import { tgwsRuntimeDir } from '../utils/dirs'
 import { getAppConfig, patchAppConfig } from '../config'
 import { loadUpdateCache, saveUpdateCache } from '../utils/update-cache'
@@ -28,6 +29,7 @@ export interface TgwsUpdateInfo {
   assetName?: string
   assetUrl?: string
   assetSize?: number
+  assetDigest?: string
   releaseUrl?: string
   publishedAt?: string
   dismissed?: boolean
@@ -62,6 +64,7 @@ interface GhAsset {
   name: string
   browser_download_url: string
   size: number
+  digest?: string | null
 }
 interface GhRelease {
   tag_name?: string
@@ -165,6 +168,7 @@ export async function checkTgwsUpdate(force = false): Promise<TgwsUpdateInfo> {
     assetName: winAsset?.name,
     assetUrl: winAsset?.browser_download_url,
     assetSize: winAsset?.size,
+    assetDigest: winAsset?.digest ?? undefined,
     releaseUrl: release.html_url,
     publishedAt: release.published_at,
     dismissed: !!latest && dismissedTag === latest
@@ -195,7 +199,9 @@ async function killStaleTgwsBinary(): Promise<void> {
 
 export async function installTgwsUpdate(
   assetUrl: string,
-  expectedVersion?: string
+  expectedVersion?: string,
+  expectedDigest?: string,
+  expectedSize?: number
 ): Promise<{ installedVersion?: string; sizeBytes: number }> {
   if (!assetUrl) throw new Error('Пустая ссылка на бинарник')
 
@@ -228,11 +234,41 @@ export async function installTgwsUpdate(
     // 404 page or a redirect we failed to follow.
     throw new Error(`Загруженный файл слишком маленький (${buf.length} байт)`)
   }
+  if (!(buf[0] === 0x4d && buf[1] === 0x5a)) {
+    throw new Error('Загруженный файл не является исполняемым файлом Windows (нет заголовка MZ)')
+  }
+  if (expectedSize && expectedSize > 0 && buf.length !== expectedSize) {
+    throw new Error(
+      `Размер TgWsProxy не совпадает: получено ${buf.length} байт, ожидалось ${expectedSize}`
+    )
+  }
+  const digestMatch = /^sha256:([0-9a-f]{64})$/i.exec(expectedDigest?.trim() ?? '')
+  if (digestMatch) {
+    const actual = createHash('sha256').update(buf).digest('hex')
+    if (actual !== digestMatch[1].toLowerCase()) {
+      throw new Error('Контрольная сумма TgWsProxy не совпадает — загрузка отклонена')
+    }
+  }
 
   const dir = tgwsRuntimeDir()
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
   const dest = path.join(dir, 'TgWsProxy_windows.exe')
-  writeFileSync(dest, buf)
+  // Write to a staging file first so a failed write cannot truncate the
+  // working binary that is currently on disk.
+  const tmp = `${dest}.tmp`
+  try {
+    writeFileSync(tmp, buf)
+    renameSync(tmp, dest)
+  } catch (e) {
+    try {
+      unlinkSync(tmp)
+    } catch {
+      /* noop */
+    }
+    throw new Error(
+      `Не удалось установить TgWsProxy: ${e instanceof Error ? e.message : String(e)}`
+    )
+  }
 
   // Persist version + clear "Later" dismissal.
   const finalVersion = expectedVersion || undefined

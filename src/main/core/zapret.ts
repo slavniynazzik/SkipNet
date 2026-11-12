@@ -1,5 +1,5 @@
 import { spawn, spawnSync, ChildProcess } from 'child_process'
-import { existsSync, readdirSync, readFileSync, mkdirSync, rmSync, writeFileSync } from 'fs'
+import { existsSync, readdirSync, readFileSync, mkdirSync, rmSync, writeFileSync, renameSync } from 'fs'
 import path from 'path'
 import AdmZip from 'adm-zip'
 import { BrowserWindow } from 'electron'
@@ -122,35 +122,73 @@ export async function installZapretBundle(
   }
 
   const dest = zapretRuntimeDir()
-  if (existsSync(dest)) {
-    rmSync(dest, { recursive: true, force: true })
-  }
-  mkdirSync(dest, { recursive: true })
+  // Extract into a sibling staging directory and only swap it into place once
+  // every file is written. The previous bundle must survive a failed extract
+  // (disk full, AV lock, corrupt entry) — deleting it first leaves Zapret
+  // unstartable until the user reinstalls.
+  const staging = `${dest}.staging`
+  if (existsSync(staging)) rmSync(staging, { recursive: true, force: true })
+  mkdirSync(staging, { recursive: true })
 
   let written = 0
-  for (const e of entries) {
-    if (e.isDirectory) continue
-    const name = normalize(e.entryName)
-    if (rootPrefix && !name.startsWith(rootPrefix)) continue
-    const rel = name.slice(rootPrefix.length)
-    if (!rel) continue
-    // Defensive: refuse path-traversal entries.
-    if (rel.includes('..')) continue
-    const out = path.join(dest, rel)
-    mkdirSync(path.dirname(out), { recursive: true })
-    writeFileSync(out, e.getData())
-    written++
+  try {
+    for (const e of entries) {
+      if (e.isDirectory) continue
+      const name = normalize(e.entryName)
+      if (rootPrefix && !name.startsWith(rootPrefix)) continue
+      const rel = name.slice(rootPrefix.length)
+      if (!rel) continue
+      // Defensive: refuse path-traversal entries.
+      if (rel.includes('..')) continue
+      const out = path.join(staging, rel)
+      mkdirSync(path.dirname(out), { recursive: true })
+      writeFileSync(out, e.getData())
+      written++
+    }
+
+    const startWrapperRe = /start\s+"zapret:\s*%~n0"\s+\/min\s+/gi
+    for (const f of readdirSync(staging)) {
+      if (!/^general.*\.bat$/i.test(f)) continue
+      const full = path.join(staging, f)
+      try {
+        const before = readFileSync(full, 'utf-8')
+        const after = before.replace(startWrapperRe, '')
+        if (after !== before) writeFileSync(full, after, 'utf-8')
+      } catch { /* best-effort patch — bad encoding etc. */ }
+    }
+  } catch (e) {
+    try { rmSync(staging, { recursive: true, force: true }) } catch { /* noop */ }
+    throw e
   }
 
-  const startWrapperRe = /start\s+"zapret:\s*%~n0"\s+\/min\s+/gi
-  for (const f of readdirSync(dest)) {
-    if (!/^general.*\.bat$/i.test(f)) continue
-    const full = path.join(dest, f)
+  // Swap the freshly extracted bundle into place. Keep the old one until the
+  // new one is at its final path, then delete it best-effort.
+  const previous = `${dest}.previous-${Date.now()}`
+  const hadPrevious = existsSync(dest)
+  if (hadPrevious) {
     try {
-      const before = readFileSync(full, 'utf-8')
-      const after = before.replace(startWrapperRe, '')
-      if (after !== before) writeFileSync(full, after, 'utf-8')
-    } catch { /* best-effort patch — bad encoding etc. */ }
+      renameSync(dest, previous)
+    } catch (e) {
+      try { rmSync(staging, { recursive: true, force: true }) } catch { /* noop */ }
+      throw new Error(
+        `Не удалось заменить старый бандл Zapret: ${e instanceof Error ? e.message : String(e)}`
+      )
+    }
+  }
+  try {
+    renameSync(staging, dest)
+  } catch (e) {
+    // Roll the old bundle back so the app keeps working.
+    if (hadPrevious) {
+      try { renameSync(previous, dest) } catch { /* noop */ }
+    }
+    try { rmSync(staging, { recursive: true, force: true }) } catch { /* noop */ }
+    throw new Error(
+      `Не удалось установить бандл Zapret: ${e instanceof Error ? e.message : String(e)}`
+    )
+  }
+  if (hadPrevious) {
+    try { rmSync(previous, { recursive: true, force: true }) } catch { /* noop */ }
   }
 
   // Try to infer the upstream release version from the archive's top-level
@@ -328,6 +366,10 @@ export function isWinwsRunning(): Promise<boolean> {
 }
 
 let stopRequested = false
+// Set when start() has already decided on a terminal error status and is
+// tearing the child down. The child's `exit` event must not overwrite that
+// error with a generic "stopped".
+let exitStatusSuppressed = false
 
 /**
  * Health signals derived from winws.exe's own stdout. winws is the
@@ -379,6 +421,7 @@ async function startZapretImpl(): Promise<void> {
   setStatus({ state: 'starting', startedAt: Date.now(), lastError: undefined })
   log('info', `launching: ${batPath}`)
   stopRequested = false
+  exitStatusSuppressed = false
 
   // Only kill stale winws.exe if one actually exists — saves ~150ms at
   // autostart on a fresh boot when there's nothing to clean up. WinDivert
@@ -423,6 +466,10 @@ async function startZapretImpl(): Promise<void> {
   child.on('exit', (code, signal) => {
     log('info', `zapret exited code=${code} signal=${signal ?? 'none'}`)
     child = null
+    if (exitStatusSuppressed) {
+      exitStatusSuppressed = false
+      return
+    }
     if (stopRequested) {
       setStatus({ state: 'stopped', pid: undefined, lastError: undefined })
     } else {
@@ -440,7 +487,9 @@ async function startZapretImpl(): Promise<void> {
 
     if (winwsHealth === 'failed') {
       log('error', `winws.exe reported a fatal error: ${winwsLastError ?? '(no detail)'}`)
+      exitStatusSuppressed = true
       await killWinws()
+      child = null
       setStatus({
         state: 'error',
         pid: undefined,
@@ -466,6 +515,7 @@ async function startZapretImpl(): Promise<void> {
     return
   }
 
+  exitStatusSuppressed = true
   setStatus({
     state: 'error',
     lastError: 'winws.exe не запустился за 7с — запустите приложение от администратора'

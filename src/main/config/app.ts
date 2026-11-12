@@ -21,15 +21,17 @@ async function safeWriteConfig(content: string): Promise<void> {
   const backupPath = `${configPath}.backup`
   try {
     await writeFile(tmpPath, content, 'utf-8')
+    // Keep the last known-good copy before replacing the live file.
     if (existsSync(configPath)) {
-      await copyFile(configPath, backupPath)
-      if (process.platform === 'win32') {
-        await unlink(configPath)
+      try {
+        await copyFile(configPath, backupPath)
+      } catch {
+        /* noop — the backup is best-effort, the live write still proceeds */
       }
     }
-    if (existsSync(tmpPath)) {
-      await rename(tmpPath, configPath)
-    }
+    // `rename` atomically replaces an existing destination on both Windows and
+    // POSIX, so the live config is never missing between unlink and rename.
+    await rename(tmpPath, configPath)
   } catch (e) {
     if (existsSync(tmpPath)) {
       try { await unlink(tmpPath) } catch { /* noop */ }
@@ -38,20 +40,28 @@ async function safeWriteConfig(content: string): Promise<void> {
   }
 }
 
+/**
+ * Read the live config, falling back to the last known-good backup when the
+ * primary file is missing, unreadable or corrupt. Returns `null` when neither
+ * copy parses so the caller can use the defaults.
+ */
+async function readConfigFromDisk(): Promise<AppConfig | null> {
+  const candidates = [appConfigPath(), `${appConfigPath()}.backup`]
+  for (const file of candidates) {
+    try {
+      const data = await readFile(file, 'utf-8')
+      const parsed = parseYaml<AppConfig>(data)
+      if (parsed && isValidConfig(parsed)) return parsed
+    } catch {
+      /* try the next candidate */
+    }
+  }
+  return null
+}
+
 export async function getAppConfig(force = false): Promise<AppConfig> {
   if (force || !appConfig) {
-    try {
-      const data = await readFile(appConfigPath(), 'utf-8')
-      const parsed = parseYaml<AppConfig>(data)
-      if (!parsed || !isValidConfig(parsed)) {
-        const backup = await readFile(`${appConfigPath()}.backup`, 'utf-8')
-        appConfig = parseYaml<AppConfig>(backup)
-      } else {
-        appConfig = parsed
-      }
-    } catch {
-      appConfig = defaultConfig
-    }
+    appConfig = (await readConfigFromDisk()) ?? defaultConfig
   }
   if (!appConfig || typeof appConfig !== 'object') appConfig = defaultConfig
 
@@ -166,41 +176,60 @@ export async function getAppConfig(force = false): Promise<AppConfig> {
 }
 
 export async function patchAppConfig(patch: Partial<AppConfig>): Promise<void> {
-  const previous = writePromise
-  const prevAutoLaunch = appConfig?.autoLaunch
-  const prevDisableTray = appConfig?.disableTray
-  const prevHideTaskbarIcon = appConfig?.hideTaskbarIcon
-  writePromise = (async () => {
-    await previous
+  // Run the merge, the disk write and all dependent side effects inside the
+  // serialized queue. Values captured *outside* the queue are stale when two
+  // patches are fired back-to-back (the renderer does not await them), which
+  // made autostart/tray toggles race and skip the matching side effect.
+  const apply = async (): Promise<void> => {
+    const prevAutoLaunch = appConfig?.autoLaunch
+    const prevDisableTray = appConfig?.disableTray
+    const prevHideTaskbarIcon = appConfig?.hideTaskbarIcon
+
     appConfig = deepMerge(appConfig ?? defaultConfig, patch)
     await safeWriteConfig(stringifyYaml(appConfig))
-  })()
+
+    if (patch.autoLaunch !== undefined && patch.autoLaunch !== prevAutoLaunch) {
+      try {
+        if (patch.autoLaunch) await enableAutoRun()
+        else await disableAutoRun()
+      } catch { /* noop */ }
+    }
+    // React to tray toggle: create or destroy tray on the fly so the user
+    // doesn't have to relaunch the app for the change to take effect.
+    if (patch.disableTray !== undefined && patch.disableTray !== prevDisableTray) {
+      try {
+        const tray = await import('../resolve/tray')
+        if (patch.disableTray) tray.destroyTray()
+        else await tray.createTray()
+      } catch { /* noop */ }
+    }
+    const disableTrayChanged =
+      patch.disableTray !== undefined && patch.disableTray !== prevDisableTray
+    const hideChanged =
+      patch.hideTaskbarIcon !== undefined && patch.hideTaskbarIcon !== prevHideTaskbarIcon
+    if (hideChanged || disableTrayChanged) {
+      try {
+        const { applySkipTaskbar } = await import('../resolve/windowVisibility')
+        applySkipTaskbar()
+      } catch { /* noop */ }
+    }
+
+    // Notify every renderer so config written by the main process (component
+    // installers, secret regeneration, update dismissal) refreshes the UI
+    // immediately instead of waiting for a route remount.
+    try {
+      const { BrowserWindow } = await import('electron')
+      for (const win of BrowserWindow.getAllWindows()) {
+        if (!win.isDestroyed()) win.webContents.send('appConfigUpdated')
+      }
+    } catch { /* noop */ }
+  }
+
+  const previous = writePromise
+  // Recover from a previously failed write instead of poisoning the queue:
+  // without the catch every later patch would reject before touching disk.
+  writePromise = previous.catch(() => void 0).then(apply)
   await writePromise
-  if (patch.autoLaunch !== undefined && patch.autoLaunch !== prevAutoLaunch) {
-    try {
-      if (patch.autoLaunch) await enableAutoRun()
-      else await disableAutoRun()
-    } catch { /* noop */ }
-  }
-  // React to tray toggle: create or destroy tray on the fly so the user
-  // doesn't have to relaunch the app for the change to take effect.
-  if (patch.disableTray !== undefined && patch.disableTray !== prevDisableTray) {
-    try {
-      const tray = await import('../resolve/tray')
-      if (patch.disableTray) tray.destroyTray()
-      else await tray.createTray()
-    } catch { /* noop */ }
-  }
-  const disableTrayChanged =
-    patch.disableTray !== undefined && patch.disableTray !== prevDisableTray
-  const hideChanged =
-    patch.hideTaskbarIcon !== undefined && patch.hideTaskbarIcon !== prevHideTaskbarIcon
-  if (hideChanged || disableTrayChanged) {
-    try {
-      const { applySkipTaskbar } = await import('../resolve/windowVisibility')
-      applySkipTaskbar()
-    } catch { /* noop */ }
-  }
 }
 
 export function getAppConfigSync(): AppConfig {

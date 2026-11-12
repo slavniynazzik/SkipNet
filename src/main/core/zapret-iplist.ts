@@ -138,6 +138,14 @@ function listFile(): string {
   return path.join(zapretBundleDir(), 'lists', 'list-general.txt')
 }
 
+// Zapret's `general.bat` loads this file *in addition to* list-general.txt
+// (`--hostlist="...list-general-user.txt"`). Entries the user adds through
+// SkipNet must live here: "update lists from GitHub" replaces list-general.txt
+// wholesale and would otherwise silently delete them.
+function userListFile(): string {
+  return path.join(zapretBundleDir(), 'lists', 'list-general-user.txt')
+}
+
 function backupFile(): string {
   // No upstream backup is shipped for list-general.txt вЂ” we mint one
   // ourselves on first edit (see ensureBackup) so В«restore from backupВ»
@@ -184,7 +192,11 @@ function ensureDirOrThrow(): void {
 
 export function getIpListSnapshot(): IpListSnapshot {
   const file = listFile()
-  const lines = dedup(readLines(file).filter(isValidListEntry))
+  // Report both files: general.bat applies list-general.txt and
+  // list-general-user.txt together, so the UI count must include both.
+  const lines = dedup(
+    [...readLines(file), ...readLines(userListFile())].filter(isValidListEntry)
+  )
   return {
     total: lines.length,
     preview: lines.slice(0, 25),
@@ -230,6 +242,24 @@ export function applyIpListPatch(patch: IpListPatch): IpListSnapshot {
 
   const merged = dedup([...existing, ...fromSets, ...fromCustom])
   writeAtomic(file, merged.join('\r\n') + (merged.length ? '\r\n' : ''))
+
+  // Persist the user-controlled part to the `-user` list that upstream list
+  // updates never touch, so a later "Списки хостов" refresh cannot delete
+  // curated/custom entries. `replace` resets it to just this patch.
+  const userFile = userListFile()
+  const existingUser = patch.replace ? [] : readLines(userFile).filter(isValidListEntry)
+  // One-time migration: entries added by older SkipNet builds were written
+  // straight into list-general.txt. Anything not present in the pristine
+  // backup is user-added and must survive the next upstream refresh.
+  const legacyUserEntries = patch.replace
+    ? []
+    : (() => {
+        const original = new Set(readLines(backupFile()).filter(isValidListEntry))
+        return existing.filter((entry) => !original.has(entry))
+      })()
+  const userMerged = dedup([...existingUser, ...legacyUserEntries, ...fromSets, ...fromCustom])
+  writeAtomic(userFile, userMerged.join('\r\n') + (userMerged.length ? '\r\n' : ''))
+
   return getIpListSnapshot()
 }
 
@@ -237,6 +267,7 @@ export function clearIpList(): IpListSnapshot {
   ensureDirOrThrow()
   ensureBackup()
   writeAtomic(listFile(), '')
+  writeAtomic(userListFile(), '')
   return getIpListSnapshot()
 }
 

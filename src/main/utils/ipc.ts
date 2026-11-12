@@ -193,8 +193,13 @@ export function registerIpcMainHandlers(): void {
   ipcMain.handle('tgws:restart', h(() => restartTgws()))
   ipcMain.handle('tgws:getLink', h(() => getTgwsLink()))
   ipcMain.handle('tgws:checkUpdate', h((force) => checkTgwsUpdate(Boolean(force))))
-  ipcMain.handle('tgws:installUpdate', h((url, expectedVersion) =>
-    installTgwsUpdate(url as string, expectedVersion as string | undefined)
+  ipcMain.handle('tgws:installUpdate', h((url, expectedVersion, expectedDigest, expectedSize) =>
+    installTgwsUpdate(
+      url as string,
+      expectedVersion as string | undefined,
+      expectedDigest as string | undefined,
+      typeof expectedSize === 'number' ? expectedSize : undefined
+    )
   ))
   ipcMain.handle('tgws:dismissUpdate', h((tag) => dismissTgwsUpdate(tag as string)))
 
@@ -208,8 +213,13 @@ export function registerIpcMainHandlers(): void {
     installZapretBundle(bytes as Uint8Array)
   ))
   ipcMain.handle('zapret:checkUpdate', h((force) => checkZapretUpdate(Boolean(force))))
-  ipcMain.handle('zapret:installUpdate', h((url, expectedVersion) =>
-    installZapretUpdate(url as string, expectedVersion as string | undefined)
+  ipcMain.handle('zapret:installUpdate', h((url, expectedVersion, expectedDigest, expectedSize) =>
+    installZapretUpdate(
+      url as string,
+      expectedVersion as string | undefined,
+      expectedDigest as string | undefined,
+      typeof expectedSize === 'number' ? expectedSize : undefined
+    )
   ))
   ipcMain.handle('zapret:dismissUpdate', h((tag) => dismissZapretUpdate(tag as string)))
 
@@ -236,8 +246,13 @@ export function registerIpcMainHandlers(): void {
 
   // ---- SkipNet self-update ----------------------------------------------
   ipcMain.handle('app:checkUpdate', h((force) => checkAppUpdate(Boolean(force))))
-  ipcMain.handle('app:installUpdate', h((url, expectedVersion) =>
-    installAppUpdate(url as string, expectedVersion as string | undefined)
+  ipcMain.handle('app:installUpdate', h((url, expectedVersion, expectedDigest, expectedSize) =>
+    installAppUpdate(
+      url as string,
+      expectedVersion as string | undefined,
+      expectedDigest as string | undefined,
+      typeof expectedSize === 'number' ? expectedSize : undefined
+    )
   ))
   ipcMain.handle('app:dismissUpdate', h((tag) => dismissAppUpdate(tag as string)))
 

@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.0.1-303036?style=flat-square" alt="Версия 1.0.1" />
+  <img src="https://img.shields.io/badge/version-1.0.2-303036?style=flat-square" alt="Версия 1.0.2" />
   <img src="https://img.shields.io/badge/Windows-10%20%2F%2011%20x64-303036?style=flat-square" alt="Windows 10 и 11, x64" />
   <img src="https://img.shields.io/badge/language-RU%20%2F%20EN-303036?style=flat-square" alt="Русский и английский" />
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0-303036?style=flat-square" alt="Лицензия GPL-3.0" /></a>

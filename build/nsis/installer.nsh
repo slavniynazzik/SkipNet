@@ -46,6 +46,14 @@
   DeleteRegValue HKLM "Software\Microsoft\Windows\CurrentVersion\Run" "Slipgate"
   DeleteRegKey HKCR "slipgate"
   DeleteRegKey HKCU "Software\Classes\slipgate"
+
+  ; --- Clear one-shot upgrade markers ---------------------------------------
+  ; app-updater.ts writes these next to SkipNet.exe before launching the new
+  ; installer so the OLD uninstaller can detect an in-place upgrade. They must
+  ; not survive the upgrade: otherwise a later *manual* uninstall would still
+  ; see them, skip the user-data wipe and leave every trace behind.
+  Delete "$INSTDIR\.skipnet-upgrade"
+  Delete "$INSTDIR\.slipgate-upgrade"
 !macroend
 
 !macro customUnInstall
@@ -65,6 +73,9 @@
   ; present we skip the destructive cleanup entirely (electron-builder still
   ; removes the install directory's tracked files) and let the new installer
   ; write fresh binaries over the old ones.
+  ${if} ${isUpdated}
+    Goto skipnet_skip_wipe
+  ${endif}
   IfFileExists "$INSTDIR\.skipnet-upgrade" skipnet_skip_wipe 0
   IfFileExists "$INSTDIR\.slipgate-upgrade" skipnet_skip_wipe 0
 

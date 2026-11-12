@@ -12,6 +12,7 @@ import {
   zapretInstallUpdate,
   zapretDismissUpdate,
   zapretRunStrategyTest,
+  getAppConfig,
   type ZapretUpdateInfo
 } from '@renderer/utils/ipc'
 import { useAppConfig } from '@renderer/hooks/use-app-config'
@@ -27,6 +28,7 @@ const Zapret: React.FC = () => {
   const status = useZapretStore((s) => s.status)
   const { appConfig, patchAppConfig } = useAppConfig()
   const [strategies, setStrategies] = useState<{ file: string; title: string; description: string }[]>([])
+  const [bundleRefreshKey, setBundleRefreshKey] = useState(0)
   const zapret = appConfig?.zapret
   const active = zapret?.activeStrategy
   const location = useLocation()
@@ -99,7 +101,12 @@ const Zapret: React.FC = () => {
       description: updateInfo.assetName ?? `v${updateInfo.latest}`
     })
     try {
-      const res = await zapretInstallUpdate(updateInfo.assetUrl, updateInfo.latest)
+      const res = await zapretInstallUpdate(
+        updateInfo.assetUrl,
+        updateInfo.latest,
+        updateInfo.assetDigest,
+        updateInfo.assetSize
+      )
       toast.success('Zapret обновлён', {
         id: tId,
         description: `Версия ${res.installedVersion ?? updateInfo.latest} — стратегий: ${res.strategies}`,
@@ -111,10 +118,16 @@ const Zapret: React.FC = () => {
       // If the active strategy no longer exists in the new bundle, drop it
       // so the user is forced to pick a fresh one before next start.
       refreshStrategies()
-      if (zapret && active) {
+      setBundleRefreshKey((k) => k + 1)
+      if (active) {
         const fresh = await zapretListStrategies().catch(() => [])
         if (!fresh.some((s) => s.file === active)) {
-          await patchAppConfig({ zapret: { ...zapret, activeStrategy: undefined } })
+          // Re-read the config: the install above just persisted the new
+          // version, so spreading the pre-install snapshot would roll it back.
+          const latestCfg = await getAppConfig()
+          await patchAppConfig({
+            zapret: { ...(latestCfg.zapret as ZapretConfig), activeStrategy: undefined }
+          })
         }
       }
       // Re-check so the banner disappears immediately.
@@ -267,6 +280,7 @@ const Zapret: React.FC = () => {
         </div>
 
       <ZapretIpListCard
+        refreshKey={bundleRefreshKey}
         disabled={isTestRunning || status.state === 'starting' || status.state === 'stopping'}
         disabledReason={
           isTestRunning

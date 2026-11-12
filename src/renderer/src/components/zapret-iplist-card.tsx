@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { toast } from 'sonner'
 import {
   ChevronDown,
@@ -30,9 +30,11 @@ import {
 interface Props {
   disabled?: boolean
   disabledReason?: string
+  /** Changes whenever the installed Zapret bundle changes, forcing a reload. */
+  refreshKey?: string | number
 }
 
-const ZapretIpListCard: React.FC<Props> = ({ disabled = false, disabledReason }) => {
+const ZapretIpListCard: React.FC<Props> = ({ disabled = false, disabledReason, refreshKey }) => {
   const [open, setOpen] = useState(false)
   const [snapshot, setSnapshot] = useState<IpListSnapshot | null>(null)
   const [sets, setSets] = useState<CuratedIpSet[]>([])
@@ -41,7 +43,6 @@ const ZapretIpListCard: React.FC<Props> = ({ disabled = false, disabledReason })
   const [busy, setBusy] = useState(false)
   const [listsStatus, setListsStatus] = useState<ZapretListsStatus | null>(null)
   const [updating, setUpdating] = useState<ZapretListsScope | null>(null)
-  const loadedRef = useRef(false)
 
   const refresh = async (): Promise<void> => {
     try {
@@ -62,10 +63,8 @@ const ZapretIpListCard: React.FC<Props> = ({ disabled = false, disabledReason })
   }
 
   useEffect(() => {
-    if (loadedRef.current) return
-    loadedRef.current = true
     void refresh()
-  }, [])
+  }, [refreshKey])
 
   const togglePicked = (id: string): void => {
     setPicked((prev) => {
