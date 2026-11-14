@@ -253,7 +253,10 @@ export function registerIpcMainHandlers(): void {
   }))
 
   // ---- Zapret network filters (game filter + IPSet mode) -----------------
-  ipcMain.handle('zapret:getGameFilter', h(() => getGameFilterSettings()))
+  ipcMain.handle('zapret:getGameFilter', h(async () => {
+    const cfg = await getAppConfig()
+    return getGameFilterSettings(cfg.zapret)
+  }))
   ipcMain.handle('zapret:setGameFilter', h((patch) =>
     setGameFilter((patch ?? {}) as SetGameFilterInput)
   ))
