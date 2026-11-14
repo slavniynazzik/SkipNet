@@ -53,6 +53,9 @@ export const defaultConfig: AppConfig = {
     // first run instead of silently committing them to one (general.bat).
     activeStrategy: undefined,
     gameFilter: false,
+    gameFilterMode: 'disabled',
+    gameFilterTcpRange: '1024-65535',
+    gameFilterUdpRange: '1024-65535',
     ipsetMode: 'loaded',
     useService: false
   }

@@ -25,7 +25,7 @@ export interface IpListPatch {
 
 // list-general.txt is consumed by Zapret as a hostlist (SNI / Host
 // header matching). Domains are the primary entry; IPs/CIDRs are
-// accepted too вЂ” some Zapret strategies cross-reference both. The
+// accepted too — some Zapret strategies cross-reference both. The
 // entry grammar lives in `zapret-list-lines.ts` so the upstream updater
 // validates exactly the same way.
 
@@ -33,7 +33,7 @@ export const CURATED_IP_SETS: CuratedIpSet[] = [
   {
     id: 'discord',
     name: 'Discord',
-    description: 'РћСЃРЅРѕРІРЅС‹Рµ РґРѕРјРµРЅС‹ Discord, РёС… CDN Рё РіРѕР»РѕСЃРѕРІС‹С… СЃРµСЂРІРёСЃРѕРІ.',
+    description: 'Основные домены Discord, их CDN и голосовых сервисов.',
     cidrs: [
       'discord.com',
       'discordapp.com',
@@ -50,7 +50,7 @@ export const CURATED_IP_SETS: CuratedIpSet[] = [
   {
     id: 'telegram',
     name: 'Telegram',
-    description: 'Р”РѕРјРµРЅС‹ Telegram Рё РІСЃРїРѕРјРѕРіР°С‚РµР»СЊРЅС‹С… СЃРµСЂРІРёСЃРѕРІ.',
+    description: 'Домены Telegram и вспомогательных сервисов.',
     cidrs: [
       'telegram.org',
       'telegram.me',
@@ -66,7 +66,7 @@ export const CURATED_IP_SETS: CuratedIpSet[] = [
   {
     id: 'youtube',
     name: 'YouTube / Google',
-    description: 'Р”РѕРјРµРЅС‹ YouTube Рё СЃРјРµР¶РЅС‹С… СЃРµСЂРІРёСЃРѕРІ Google.',
+    description: 'Домены YouTube и смежных сервисов Google.',
     cidrs: [
       'youtube.com',
       'youtu.be',
@@ -85,7 +85,7 @@ export const CURATED_IP_SETS: CuratedIpSet[] = [
   {
     id: 'cloudflare',
     name: 'Cloudflare',
-    description: 'РљР»СЋС‡РµРІС‹Рµ РґРѕРјРµРЅС‹ Cloudflare (DNS, Workers, ECH, R2).',
+    description: 'Ключевые домены Cloudflare (DNS, Workers, ECH, R2).',
     cidrs: [
       'cloudflare.com',
       'cloudflare-dns.com',
@@ -102,7 +102,7 @@ export const CURATED_IP_SETS: CuratedIpSet[] = [
   {
     id: 'twitch',
     name: 'Twitch',
-    description: 'Р”РѕРјРµРЅС‹ Twitch Рё РёС… CDN.',
+    description: 'Домены Twitch и их CDN.',
     cidrs: [
       'twitch.tv',
       'ttvnw.net',
@@ -116,7 +116,7 @@ export const CURATED_IP_SETS: CuratedIpSet[] = [
   {
     id: 'spotify',
     name: 'Spotify',
-    description: 'Р”РѕРјРµРЅС‹ Spotify Рё СЃРјРµР¶РЅС‹С… CDN.',
+    description: 'Домены Spotify и смежных CDN.',
     cidrs: [
       'spotify.com',
       'spotifycdn.com',
@@ -147,8 +147,8 @@ function userListFile(): string {
 }
 
 function backupFile(): string {
-  // No upstream backup is shipped for list-general.txt вЂ” we mint one
-  // ourselves on first edit (see ensureBackup) so В«restore from backupВ»
+  // No upstream backup is shipped for list-general.txt — we mint one
+  // ourselves on first edit (see ensureBackup) so «restore from backup»
   // can roll back to the original Flowseal hostlist.
   return path.join(zapretBundleDir(), 'lists', 'list-general.txt.backup')
 }
@@ -186,7 +186,7 @@ function dedup(list: string[]): string[] {
 function ensureDirOrThrow(): void {
   const dir = path.dirname(listFile())
   if (!existsSync(dir)) {
-    throw new Error(`zapret-bundle РѕС‚СЃСѓС‚СЃС‚РІСѓРµС‚: РЅРµС‚ ${dir}. РЈСЃС‚Р°РЅРѕРІРёС‚Рµ/РѕР±РЅРѕРІРёС‚Рµ Zapret.`)
+    throw new Error(`zapret-bundle отсутствует: нет ${dir}. Установите/обновите Zapret.`)
   }
 }
 
@@ -211,7 +211,7 @@ function safeSize(file: string): number {
 
 /**
  * Apply a patch to list-general.txt:
- *  - replace=true в†’ wipe the file first
+ *  - replace=true → wipe the file first
  *  - then merge in entries from selected curated sets + custom user lines
  *
  * Accepts hostnames, IPv4/IPv6 addresses, and CIDR ranges. Invalid lines
@@ -280,7 +280,7 @@ export function restoreIpListBackup(): IpListSnapshot {
   ensureDirOrThrow()
   const src = backupFile()
   if (!existsSync(src)) {
-    throw new Error('Backup-С„Р°Р№Р» list-general.txt.backup РµС‰С‘ РЅРµ СЃРѕР·РґР°РЅ (РІС‹ РЅРё СЂР°Р·Сѓ РЅРµ РїСЂР°РІРёР»Рё СЃРїРёСЃРѕРє).')
+    throw new Error('Backup-файл list-general.txt.backup ещё не создан (вы ни разу не правили список).')
   }
   copyFileSync(src, listFile())
   return getIpListSnapshot()

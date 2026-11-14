@@ -185,6 +185,40 @@ export const zapretUpdateLists = (
   scope: ZapretListsScope = 'all'
 ): Promise<ZapretListsUpdateResult> => invoke('zapret:updateLists', scope)
 
+// ---- Zapret network filters (game filter + IPSet mode) --------------------
+export type GameFilterMode = 'disabled' | 'all' | 'tcp' | 'udp'
+export interface GameFilterSettings {
+  mode: GameFilterMode
+  tcpRange: string
+  udpRange: string
+  enabled: boolean
+}
+export interface SetGameFilterResult extends GameFilterSettings {
+  applied: boolean
+}
+export interface SetGameFilterInput {
+  mode?: GameFilterMode
+  tcpRange?: string
+  udpRange?: string
+}
+export const zapretGetGameFilter = (): Promise<GameFilterSettings> =>
+  invoke('zapret:getGameFilter')
+export const zapretSetGameFilter = (
+  patch: SetGameFilterInput
+): Promise<SetGameFilterResult> => invoke('zapret:setGameFilter', patch)
+
+export type IpSetMode = 'none' | 'loaded' | 'any'
+export interface IpSetModeStatus {
+  mode: IpSetMode
+  entries: number
+  hasBackup: boolean
+  file: string
+}
+export const zapretGetIpSetMode = (): Promise<IpSetModeStatus> =>
+  invoke('zapret:getIpSetMode')
+export const zapretSetIpSetMode = (mode: IpSetMode): Promise<IpSetModeStatus> =>
+  invoke('zapret:setIpSetMode', mode)
+
 // ---- SkipNet self-update ---------------------------------------------------
 export interface AppUpdateInfo {
   installed: string

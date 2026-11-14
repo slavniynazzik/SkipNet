@@ -5,6 +5,7 @@ import AdmZip from 'adm-zip'
 import { BrowserWindow } from 'electron'
 import { zapretBundleDir, zapretRuntimeDir } from '../utils/dirs'
 import { getAppConfig } from '../config'
+import { applyGameFilterToBundle, getGameFilterSettings } from './zapret-settings'
 
 export interface StrategyDescriptor {
   file: string
@@ -422,6 +423,14 @@ async function startZapretImpl(): Promise<void> {
   log('info', `launching: ${batPath}`)
   stopRequested = false
   exitStatusSuppressed = false
+
+  // general.bat reads game_filter.enabled during launch, so make sure the
+  // runtime file reflects the current UI settings before spawning.
+  try {
+    applyGameFilterToBundle(getGameFilterSettings(z))
+  } catch (e) {
+    log('warn', `game filter file not written: ${e instanceof Error ? e.message : String(e)}`)
+  }
 
   // Only kill stale winws.exe if one actually exists — saves ~150ms at
   // autostart on a fresh boot when there's nothing to clean up. WinDivert

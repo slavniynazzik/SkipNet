@@ -37,8 +37,16 @@ import {
 import {
   getZapretListsStatus,
   updateZapretLists,
+  getIpSetModeStatus,
+  setIpSetMode,
+  type IpSetMode,
   type ZapretListsScope
 } from '../core/zapret-lists'
+import {
+  getGameFilterSettings,
+  setGameFilter,
+  type SetGameFilterInput
+} from '../core/zapret-settings'
 import {
   checkTgwsUpdate,
   installTgwsUpdate,
@@ -242,6 +250,18 @@ export function registerIpcMainHandlers(): void {
   ipcMain.handle('zapret:updateLists', h((scope) => {
     const value = scope === 'hosts' || scope === 'ip' || scope === 'all' ? scope : 'all'
     return updateZapretLists(value as ZapretListsScope)
+  }))
+
+  // ---- Zapret network filters (game filter + IPSet mode) -----------------
+  ipcMain.handle('zapret:getGameFilter', h(() => getGameFilterSettings()))
+  ipcMain.handle('zapret:setGameFilter', h((patch) =>
+    setGameFilter((patch ?? {}) as SetGameFilterInput)
+  ))
+  ipcMain.handle('zapret:getIpSetMode', h(() => getIpSetModeStatus()))
+  ipcMain.handle('zapret:setIpSetMode', h((mode) => {
+    const value: IpSetMode =
+      mode === 'none' || mode === 'loaded' || mode === 'any' ? mode : 'loaded'
+    return setIpSetMode(value)
   }))
 
   // ---- SkipNet self-update ----------------------------------------------

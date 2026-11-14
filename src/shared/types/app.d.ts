@@ -77,7 +77,12 @@ interface ZapretConfig {
   enabled: boolean
   autoStart?: boolean
   activeStrategy?: string          // file name of the .bat strategy
-  gameFilter?: boolean             // enable UDP/TCP >1023 filter
+  gameFilter?: boolean             // legacy on/off flag, migrated to gameFilterMode
+  // Game filter (utils/game_filter.enabled). `disabled` leaves
+  // general.bat's default 12 port so the extra rules are effectively off.
+  gameFilterMode?: 'disabled' | 'all' | 'tcp' | 'udp'
+  gameFilterTcpRange?: string      // e.g. '1024-65535' or '1024-1934,1936-65535'
+  gameFilterUdpRange?: string
   ipsetMode?: 'none' | 'loaded' | 'any'
   bundlePath?: string              // override path to unpacked zapret folder
   useService?: boolean             // installed as Windows service

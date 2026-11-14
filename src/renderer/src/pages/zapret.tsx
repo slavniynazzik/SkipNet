@@ -23,6 +23,7 @@ import { cn, BUNDLED_ZAPRET_VERSION, POWER_ON_BANNER_STYLE, POWER_OFF_BANNER_STY
 import BasePage from '@renderer/components/base/base-page'
 import SwitcherCard from '@renderer/components/switcher-card'
 import ZapretIpListCard from '@renderer/components/zapret-iplist-card'
+import ZapretNetworkCard from '@renderer/components/zapret-network-card'
 
 const Zapret: React.FC = () => {
   const status = useZapretStore((s) => s.status)
@@ -278,6 +279,16 @@ const Zapret: React.FC = () => {
             Проверить
           </Button>
         </div>
+
+      <ZapretNetworkCard
+        refreshKey={bundleRefreshKey}
+        disabled={isTestRunning || status.state === 'starting' || status.state === 'stopping'}
+        disabledReason={
+          isTestRunning
+            ? 'Идёт тестирование стратегий — настройки фильтров временно недоступны'
+            : 'Подождите завершения переключения Zapret'
+        }
+      />
 
       <ZapretIpListCard
         refreshKey={bundleRefreshKey}

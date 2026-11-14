@@ -27,6 +27,7 @@ import {
 import path from 'node:path'
 import { zapretBundleDir } from '../utils/dirs'
 import { fetchGithub } from '../utils/github'
+import { getAppConfig, patchAppConfig } from '../config'
 import { isValidCidrEntry, isValidListEntry, normalizeListContent } from './zapret-list-lines'
 
 const DEFAULT_UPSTREAM_BASE =
@@ -311,4 +312,89 @@ export async function updateZapretLists(
   }
 
   return { updated, totalEntries, status: getZapretListsStatus() }
+}
+
+// ---- IPSet filter modes ---------------------------------------------------
+//
+// Flowseal's `service.bat` exposes three states for `lists/ipset-all.txt`:
+//
+//  - `loaded` — the real downloaded IP ranges (default);
+//  - `none`   — a single dummy range (203.0.113.113/32), so no IP is filtered;
+//  - `any`    — an empty file, so every IP matches the ipset rule.
+//
+// The previous list is kept in `ipset-all.txt.backup` so `loaded` can be
+// restored after switching to `none` or `any`.
+
+export type IpSetMode = 'none' | 'loaded' | 'any'
+
+export interface IpSetModeStatus {
+  mode: IpSetMode
+  entries: number
+  hasBackup: boolean
+  file: string
+}
+
+const IPSET_PLACEHOLDER = '203.0.113.113/32'
+
+function ipsetFile(): string {
+  return path.join(listsDir(), 'ipset-all.txt')
+}
+
+export function getIpSetModeStatus(): IpSetModeStatus {
+  const file = ipsetFile()
+  const lines = readText(file)
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+  let mode: IpSetMode
+  if (lines.length === 0) mode = 'any'
+  else if (lines.includes(IPSET_PLACEHOLDER)) mode = 'none'
+  else mode = 'loaded'
+  const backup = backupPath(file)
+  return {
+    mode,
+    entries: lines.length,
+    hasBackup: existsSync(backup) && safeSize(backup) > 0,
+    file
+  }
+}
+
+/** Switch `lists/ipset-all.txt` between loaded/none/any mode. */
+export async function setIpSetMode(mode: IpSetMode): Promise<IpSetModeStatus> {
+  ensureBundle()
+  const file = ipsetFile()
+  const current = getIpSetModeStatus()
+  if (current.mode === mode) return current
+
+  const backup = backupPath(file)
+
+  if (mode === 'loaded') {
+    if (!existsSync(backup) || safeSize(backup) === 0) {
+      throw new Error(
+        'Нет резервной копии ipset-all.txt. Сначала обновите IP-список из GitHub.'
+      )
+    }
+    copyFileSync(backup, file)
+  } else {
+    // Keep the current ranges recoverable before replacing the file. Only a
+    // loaded list is worth saving — backing up the placeholder/empty file
+    // would later make `loaded` restore nothing useful.
+    if ((!existsSync(backup) || safeSize(backup) === 0) && current.mode === 'loaded') {
+      ensureBackup(file)
+    }
+    writeAtomic(file, mode === 'none' ? `${IPSET_PLACEHOLDER}\r\n` : '')
+  }
+
+  const status = getIpSetModeStatus()
+  try {
+    const cfg = await getAppConfig()
+    if (cfg.zapret) {
+      await patchAppConfig({
+        zapret: { ...(cfg.zapret as ZapretConfig), ipsetMode: status.mode }
+      })
+    }
+  } catch {
+    /* best-effort — the file state is authoritative for Zapret */
+  }
+  return status
 }
