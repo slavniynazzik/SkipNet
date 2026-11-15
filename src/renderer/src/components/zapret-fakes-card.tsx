@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { toast } from 'sonner'
-import { Layers } from 'lucide-react'
+import { ChevronDown, ChevronRight, Layers } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@renderer/components/ui/card'
 import { Button } from '@renderer/components/ui/button'
 import { cn } from '@renderer/lib/utils'
@@ -18,6 +18,7 @@ interface Props {
 }
 
 const ZapretFakesCard: React.FC<Props> = ({ disabled = false, disabledReason, refreshKey }) => {
+  const [open, setOpen] = useState(false)
   const [status, setStatus] = useState<FakesStatus | null>(null)
   const [discordPick, setDiscordPick] = useState('')
   const [gamePick, setGamePick] = useState('')
@@ -65,7 +66,7 @@ const ZapretFakesCard: React.FC<Props> = ({ disabled = false, disabledReason, re
 
   return (
     <Card>
-      <CardHeader className="space-y-0">
+      <CardHeader className="flex flex-row items-center justify-between gap-3 space-y-0">
         <CardTitle className="flex items-center gap-2">
           <Layers className="h-4 w-4 text-muted-foreground" />
           Активные фейки
@@ -75,7 +76,18 @@ const ZapretFakesCard: React.FC<Props> = ({ disabled = false, disabledReason, re
             </span>
           )}
         </CardTitle>
+        <Button
+          variant={open ? 'secondary' : 'outline'}
+          size="sm"
+          onClick={() => setOpen((v) => !v)}
+          className="shrink-0"
+        >
+          {open
+            ? <><ChevronDown className="h-3.5 w-3.5" /> Свернуть</>
+            : <><ChevronRight className="h-3.5 w-3.5" /> Развернуть</>}
+        </Button>
       </CardHeader>
+      {open && (
       <CardContent className="space-y-3">
         {disabled && disabledReason && (
           <p className="text-[11px] text-muted-foreground">{disabledReason}</p>
@@ -115,6 +127,7 @@ const ZapretFakesCard: React.FC<Props> = ({ disabled = false, disabledReason, re
           </>
         )}
       </CardContent>
+      )}
     </Card>
   )
 }

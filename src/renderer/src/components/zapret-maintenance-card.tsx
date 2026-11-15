@@ -3,6 +3,8 @@ import { toast } from 'sonner'
 import {
   AlertTriangle,
   CheckCircle2,
+  ChevronDown,
+  ChevronRight,
   ExternalLink,
   FileText,
   Info,
@@ -39,6 +41,7 @@ interface Props {
 }
 
 const ZapretMaintenanceCard: React.FC<Props> = ({ disabled = false, disabledReason, refreshKey }) => {
+  const [open, setOpen] = useState(false)
   const [autoUpdate, setAutoUpdate] = useState<boolean | null>(null)
   const [savingAuto, setSavingAuto] = useState(false)
   const [hosts, setHosts] = useState<HostsCheckResult | null>(null)
@@ -210,7 +213,7 @@ const ZapretMaintenanceCard: React.FC<Props> = ({ disabled = false, disabledReas
 
   return (
     <Card>
-      <CardHeader className="flex flex-row items-center justify-between gap-3 space-y-0">
+      <CardHeader className="flex flex-wrap items-center justify-between gap-2 space-y-0">
         <CardTitle className="flex items-center gap-2">
           <ShieldCheck className="h-4 w-4 text-muted-foreground" />
           Обслуживание и диагностика
@@ -225,17 +228,30 @@ const ZapretMaintenanceCard: React.FC<Props> = ({ disabled = false, disabledReas
             </span>
           )}
         </CardTitle>
-        <Button
-          variant="outline"
-          size="sm"
-          disabled={locked || diagBusy}
-          onClick={() => { void runDiagnostics() }}
-          className="shrink-0"
-        >
-          {diagBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
-          Проверить
-        </Button>
+        <div className="flex shrink-0 items-center gap-2">
+          {open && (
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={locked || diagBusy}
+              onClick={() => { void runDiagnostics() }}
+            >
+              {diagBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+              Проверить
+            </Button>
+          )}
+          <Button
+            variant={open ? 'secondary' : 'outline'}
+            size="sm"
+            onClick={() => setOpen((v) => !v)}
+          >
+            {open
+              ? <><ChevronDown className="h-3.5 w-3.5" /> Свернуть</>
+              : <><ChevronRight className="h-3.5 w-3.5" /> Развернуть</>}
+          </Button>
+        </div>
       </CardHeader>
+      {open && (
       <CardContent className="space-y-4">
         {disabled && disabledReason && (
           <p className="text-[11px] text-muted-foreground">{disabledReason}</p>
@@ -350,6 +366,7 @@ const ZapretMaintenanceCard: React.FC<Props> = ({ disabled = false, disabledReas
           </Button>
         </div>
       </CardContent>
+      )}
     </Card>
   )
 }

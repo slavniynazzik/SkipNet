@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { toast } from 'sonner'
-import { Filter } from 'lucide-react'
+import { ChevronDown, ChevronRight, Filter } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@renderer/components/ui/card'
 import { Button } from '@renderer/components/ui/button'
 import { Input } from '@renderer/components/ui/input'
@@ -39,6 +39,7 @@ const IPSET_MODES: Array<{ value: IpSetMode; label: string; hint: string }> = [
 ]
 
 const ZapretNetworkCard: React.FC<Props> = ({ disabled = false, disabledReason, refreshKey }) => {
+  const [open, setOpen] = useState(false)
   const [game, setGame] = useState<GameFilterSettings | null>(null)
   const [ipset, setIpSet] = useState<IpSetModeStatus | null>(null)
   const [tcpDraft, setTcpDraft] = useState('')
@@ -116,7 +117,7 @@ const ZapretNetworkCard: React.FC<Props> = ({ disabled = false, disabledReason, 
 
   return (
     <Card>
-      <CardHeader className="space-y-0">
+      <CardHeader className="flex flex-row items-center justify-between gap-3 space-y-0">
         <CardTitle className="flex items-center gap-2">
           <Filter className="h-4 w-4 text-muted-foreground" />
           Фильтры сети
@@ -124,7 +125,18 @@ const ZapretNetworkCard: React.FC<Props> = ({ disabled = false, disabledReason, 
             игровой фильтр и режим IPSet
           </span>
         </CardTitle>
+        <Button
+          variant={open ? 'secondary' : 'outline'}
+          size="sm"
+          onClick={() => setOpen((v) => !v)}
+          className="shrink-0"
+        >
+          {open
+            ? <><ChevronDown className="h-3.5 w-3.5" /> Свернуть</>
+            : <><ChevronRight className="h-3.5 w-3.5" /> Развернуть</>}
+        </Button>
       </CardHeader>
+      {open && (
       <CardContent className="space-y-5">
         {disabled && disabledReason && (
           <p className="text-[11px] text-muted-foreground">{disabledReason}</p>
@@ -215,6 +227,7 @@ const ZapretNetworkCard: React.FC<Props> = ({ disabled = false, disabledReason, 
           </>
         )}
       </CardContent>
+      )}
     </Card>
   )
 }
