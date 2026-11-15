@@ -218,7 +218,7 @@ const ZapretIpListCard: React.FC<Props> = ({ disabled = false, disabledReason, r
         >
           {open
             ? <><ChevronDown className="h-3.5 w-3.5" /> Свернуть</>
-            : <><ChevronRight className="h-3.5 w-3.5" /> Управление списком</>}
+            : <><ChevronRight className="h-3.5 w-3.5" /> Развернуть</>}
         </Button>
       </CardHeader>
 

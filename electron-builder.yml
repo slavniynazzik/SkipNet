@@ -68,12 +68,13 @@ extraResources:
       # copyright notice + license text to ship with the binary.
       # Drop ~600 KB of zapret cruft that the app never touches at runtime:
       # *.backup files (e.g. ipset-all.txt.backup, 538 KB) are leftovers from
-      # upstream maintainer commits, and zapret/utils/ holds an interactive
-      # PowerShell test-suite + targets list used only when running the
-      # standalone `service.bat` menu manually. SkipNet spawns winws.exe
-      # directly, so none of this ships value to end users.
+      # upstream maintainer commits.
+      #
+      # `zapret/utils/**` MUST ship: SkipNet reads and writes
+      # `utils/check_updates.enabled` from the maintenance card and launches
+      # `utils/test zapret.ps1` for "Запустить тесты". Excluding the folder
+      # used to break both actions with ENOENT / "файл не найден".
       - '!**/*.backup'
-      - '!**/zapret/utils/**'
 protocols:
   name: 'SkipNet URI Scheme'
   schemes:

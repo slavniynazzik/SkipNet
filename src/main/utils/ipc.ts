@@ -48,7 +48,7 @@ import {
   type SetGameFilterInput
 } from '../core/zapret-settings'
 import { getFakesStatus, replaceActiveFake, type FakeKind } from '../core/zapret-fakes'
-import { checkZapretHosts, prepareHostsUpdate } from '../core/zapret-hosts'
+import { checkZapretHosts, prepareHostsUpdate, applyHostsUpdate } from '../core/zapret-hosts'
 import {
   runZapretDiagnostics,
   fixTcpTimestamps,
@@ -290,6 +290,7 @@ export function registerIpcMainHandlers(): void {
   // ---- Zapret hosts / diagnostics / maintenance ---------------------------
   ipcMain.handle('zapret:checkHosts', h(() => checkZapretHosts()))
   ipcMain.handle('zapret:prepareHostsUpdate', h(() => prepareHostsUpdate()))
+  ipcMain.handle('zapret:applyHosts', h(() => applyHostsUpdate()))
   ipcMain.handle('zapret:diagnostics', h(() => runZapretDiagnostics()))
   ipcMain.handle('zapret:diagnosticsFix', h((fix) => {
     const id = fix as DiagFixId

@@ -254,6 +254,14 @@ export interface HostsCheckResult {
   entries: number
   tempPath?: string
 }
+export interface HostsApplyResult {
+  ok: boolean
+  message: string
+  hostsPath: string
+  entries: number
+  backupPath?: string
+  elevated: boolean
+}
 export type DiagStatus = 'ok' | 'warn' | 'fail' | 'info'
 export type DiagFixId = 'tcpTimestamps' | 'windivert' | 'conflictingBypasses' | 'discordCache'
 export interface DiagCheck {
@@ -286,6 +294,7 @@ export interface DiscordCacheResult {
 export const zapretCheckHosts = (): Promise<HostsCheckResult> => invoke('zapret:checkHosts')
 export const zapretPrepareHostsUpdate = (): Promise<HostsCheckResult> =>
   invoke('zapret:prepareHostsUpdate')
+export const zapretApplyHosts = (): Promise<HostsApplyResult> => invoke('zapret:applyHosts')
 export const zapretRunDiagnostics = (): Promise<DiagnosticsReport> =>
   invoke('zapret:diagnostics')
 export const zapretDiagnosticsFix = (fix: DiagFixId): Promise<DiagnosticsFixResult> =>

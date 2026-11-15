@@ -5,6 +5,7 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronRight,
+  Download,
   ExternalLink,
   FileText,
   Info,
@@ -20,6 +21,7 @@ import { Button } from '@renderer/components/ui/button'
 import { Switch } from '@renderer/components/ui/switch'
 import { cn } from '@renderer/lib/utils'
 import {
+  zapretApplyHosts,
   zapretCheckHosts,
   zapretClearDiscordCache,
   zapretDiagnosticsFix,
@@ -46,6 +48,7 @@ const ZapretMaintenanceCard: React.FC<Props> = ({ disabled = false, disabledReas
   const [savingAuto, setSavingAuto] = useState(false)
   const [hosts, setHosts] = useState<HostsCheckResult | null>(null)
   const [hostsBusy, setHostsBusy] = useState(false)
+  const [hostsApplying, setHostsApplying] = useState(false)
   const [report, setReport] = useState<DiagnosticsReport | null>(null)
   const [diagBusy, setDiagBusy] = useState(false)
   const [fixing, setFixing] = useState<string | null>(null)
@@ -115,6 +118,39 @@ const ZapretMaintenanceCard: React.FC<Props> = ({ disabled = false, disabledReas
       })
     } finally {
       setHostsBusy(false)
+    }
+  }
+
+  const applyHosts = async (): Promise<void> => {
+    if (hostsBusy || hostsApplying) return
+    if (
+      !window.confirm(
+        'Записать актуальные записи в системный файл hosts?\n\n' +
+          'Текущий файл будет сохранён рядом как hosts.skipnet-backup.'
+      )
+    ) {
+      return
+    }
+    setHostsApplying(true)
+    const tId = toast.loading('Обновляем файл hosts…')
+    try {
+      const result = await zapretApplyHosts()
+      toast.success(result.message, {
+        id: tId,
+        description: `Записей: ${result.entries}. Zapret больше не нужно обновлять вручную.`
+      })
+      try {
+        setHosts(await zapretCheckHosts())
+      } catch {
+        /* the write already succeeded; a failed re-check is cosmetic */
+      }
+    } catch (e) {
+      toast.error('Не удалось обновить файл hosts', {
+        id: tId,
+        description: e instanceof Error ? e.message : String(e)
+      })
+    } finally {
+      setHostsApplying(false)
     }
   }
 
@@ -286,24 +322,34 @@ const ZapretMaintenanceCard: React.FC<Props> = ({ disabled = false, disabledReas
                   : 'Проверка не выполнялась.'}
               </div>
             </div>
-            <div className="flex shrink-0 gap-2">
+            <div className="flex shrink-0 flex-wrap gap-2">
               <Button
                 size="sm"
                 variant="outline"
                 onClick={() => { void checkHosts() }}
-                disabled={locked || hostsBusy}
+                disabled={locked || hostsBusy || hostsApplying}
               >
                 {hostsBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
                 Проверить
               </Button>
               <Button
                 size="sm"
+                variant="outline"
                 onClick={() => { void openHosts() }}
-                disabled={locked || hostsBusy}
-                title="Скачать актуальный hosts и открыть его рядом с системным файлом"
+                disabled={locked || hostsBusy || hostsApplying}
+                title="Скачать актуальный hosts и открыть его рядом с системным файлом (ручное копирование)"
               >
                 <ExternalLink className="h-3.5 w-3.5" />
                 Открыть
+              </Button>
+              <Button
+                size="sm"
+                onClick={() => { void applyHosts() }}
+                disabled={locked || hostsBusy || hostsApplying}
+                title="Скачать актуальный hosts и записать его в системный файл автоматически"
+              >
+                {hostsApplying ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+                Обновить
               </Button>
             </div>
           </div>

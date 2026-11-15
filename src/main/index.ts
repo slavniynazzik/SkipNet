@@ -14,6 +14,7 @@ import { startZapret, stopZapret } from './core/zapret'
 import { appLog } from './utils/app-logger'
 import { enableAutoRun, disableAutoRun } from './sys/autoRun'
 import { isRunningAsAdmin } from './utils/elevation'
+import { consumeResumeZapretAfterUpdate } from './core/app-updater'
 import { migrateLegacyData } from './utils/dirs'
 
 // Lock the userData / cache / log folder names.
@@ -94,11 +95,19 @@ app.whenReady().then(async () => {
       showError('TG WS start failed', `${e}`)
     })
   }
+  const resumeZapretAfterUpdate = consumeResumeZapretAfterUpdate()
   if (appConfig.zapret?.autoStart) {
     appLog('info', 'Автозапуск Zapret — старт')
     startZapret().catch((e) => {
       appLog('error', `Автозапуск Zapret упал: ${e}`)
       showError('Zapret start failed', `${e}`)
+    })
+  } else if (resumeZapretAfterUpdate) {
+    // Zapret was on when the user installed an update. The updater stopped it
+    // so NSIS could replace the install folder; bring it back now.
+    appLog('info', 'Zapret был включён до обновления — восстанавливаем')
+    startZapret().catch((e) => {
+      appLog('error', `Восстановление Zapret после обновления упало: ${e}`)
     })
   }
 

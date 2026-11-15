@@ -9,10 +9,11 @@
  *  - Discord cache cleanup.
  */
 
-import { existsSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { spawn, spawnSync } from 'node:child_process'
 import { zapretBundleDir } from '../utils/dirs'
+import { runPowerShellElevated } from '../utils/elevated'
 import { hostsHasYoutubeEntries } from './zapret-hosts'
 
 export type DiagStatus = 'ok' | 'warn' | 'fail' | 'info'
@@ -61,7 +62,10 @@ function serviceExists(name: string): boolean {
 
 function serviceRunning(name: string): boolean {
   const out = run('sc.exe', ['query', name], 4000)
-  return /STATE\s*:\s*\d+\s+RUNNING/i.test(out)
+  // `sc.exe` localises the field label (STATE / СОСТОЯНИЕ / …), but keeps the
+  // numeric state and the RUNNING token in English. Match the value only,
+  // otherwise every service looks stopped on non-English Windows.
+  return /:\s*\d+\s+RUNNING\b/i.test(out)
 }
 
 function isWinwsRunning(): boolean {
@@ -74,10 +78,17 @@ function processRunning(image: string): boolean {
   return new RegExp(image.replace(/\./g, '\\.'), 'i').test(out)
 }
 
-function tcpTimestampsEnabled(): boolean {
+function tcpTimestampsEnabled(): boolean | null {
   const out = run('netsh.exe', ['interface', 'tcp', 'show', 'global'], 5000)
-  const line = out.split(/\r?\n/).find((l) => /timestamps/i.test(l))
-  return !!line && /enabled/i.test(line)
+  // Field names are localised: "RFC 1323 Timestamps" on English Windows,
+  // "Метки времени RFC 1323" on Russian, etc. The value stays English.
+  const line = out
+    .split(/\r?\n/)
+    .find((l) => /RFC\s*1323|timestamps|Метки времени/i.test(l))
+  if (!line) return null
+  if (/:\s*enabled\b/i.test(line)) return true
+  if (/:\s*disabled\b/i.test(line)) return false
+  return null
 }
 
 function proxyEnabled(): { enabled: boolean; server: string } {
@@ -123,8 +134,12 @@ function listRunningServices(): string[] {
   const out = scList()
   const names: string[] = []
   for (const line of out.split(/\r?\n/)) {
-    const m = /^SERVICE_NAME:\s*(\S+)/i.exec(line.trim())
-    if (m) names.push(m[1])
+    // The service-name line is the only one that starts at column 0:
+    //   SERVICE_NAME: BFE        (English)
+    //   ИМЯ_СЛУЖБЫ: BFE          (Russian)
+    // Field lines are indented, so anchoring on `^[^\s:]` keeps them out.
+    const m = /^([^\s:][^:]*):\s*(\S+)\s*$/.exec(line)
+    if (m) names.push(m[2])
   }
   return names
 }
@@ -168,17 +183,26 @@ export function runZapretDiagnostics(): DiagnosticsReport {
       : { id: 'proxy', title: 'Системный прокси', status: 'ok' }
   )
 
+  const timestamps = tcpTimestampsEnabled()
   checks.push(
-    tcpTimestampsEnabled()
+    timestamps === true
       ? { id: 'tcpTimestamps', title: 'TCP timestamps', status: 'ok' }
-      : {
-          id: 'tcpTimestamps',
-          title: 'TCP timestamps',
-          status: 'warn',
-          detail: 'TCP timestamps отключены.',
-          hint: 'Нажмите «Исправить», чтобы включить их.',
-          fix: 'tcpTimestamps'
-        }
+      : timestamps === false
+        ? {
+            id: 'tcpTimestamps',
+            title: 'TCP timestamps',
+            status: 'warn',
+            detail: 'TCP timestamps отключены.',
+            hint: 'Нажмите «Исправить», чтобы включить их.',
+            fix: 'tcpTimestamps'
+          }
+        : {
+            id: 'tcpTimestamps',
+            title: 'TCP timestamps',
+            status: 'info',
+            detail: 'Не удалось определить состояние TCP timestamps.',
+            hint: 'Проверьте вручную: netsh interface tcp show global'
+          }
   )
 
   checks.push(
@@ -355,19 +379,44 @@ export interface DiagnosticsFixResult {
 }
 
 export function fixTcpTimestamps(): DiagnosticsFixResult {
-  const r = spawnSync('netsh.exe', ['interface', 'tcp', 'set', 'global', 'timestamps=enabled'], {
-    windowsHide: true,
-    timeout: 8000,
-    encoding: 'utf8'
-  })
-  if (r.status === 0 && tcpTimestampsEnabled()) {
+  const applyDirect = (): boolean => {
+    const r = spawnSync('netsh.exe', ['interface', 'tcp', 'set', 'global', 'timestamps=enabled'], {
+      windowsHide: true,
+      timeout: 10_000,
+      encoding: 'utf8'
+    })
+    return r.status === 0
+  }
+
+  let applied = applyDirect()
+
+  // Fallback for a non-elevated session (portable launch, UAC-stripped
+  // wrapper): ask Windows for elevation through the standard UAC prompt.
+  if (!applied) {
+    const elevated = runPowerShellElevated(
+      "netsh.exe interface tcp set global timestamps=enabled | Out-Null\r\n" +
+        "if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }",
+      30_000
+    )
+    applied = elevated.ok
+  }
+
+  const state = tcpTimestampsEnabled()
+  if (state === true) {
     return { ok: true, message: 'TCP timestamps включены.' }
+  }
+  if (applied && state === null) {
+    // The command succeeded but this Windows locale is unknown to us. Don't
+    // claim a failure we cannot verify.
+    return {
+      ok: true,
+      message: 'Команда включения TCP timestamps выполнена. Перезапустите проверку при необходимости.'
+    }
   }
   return {
     ok: false,
     message:
-      'Не удалось включить TCP timestamps. Запустите SkipNet от администратора.' +
-      (r.stderr ? ` (${r.stderr.trim()})` : '')
+      'Не удалось включить TCP timestamps. Запустите SkipNet от администратора и повторите попытку.'
   }
 }
 
@@ -417,6 +466,10 @@ export function setAutoUpdateCheck(enabled: boolean): boolean {
   const file = autoUpdateCheckFile()
   try {
     if (enabled) {
+      // `utils/` is normally shipped, but older installs might be missing it
+      // (it used to be excluded from the installer). Create it on demand so
+      // toggling the setting never fails with ENOENT.
+      mkdirSync(path.dirname(file), { recursive: true })
       writeFileSync(file, 'ENABLED\r\n', 'ascii')
     } else if (existsSync(file)) {
       unlinkSync(file)

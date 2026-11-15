@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, writeFileSync, unlinkSync } from 'fs'
-import { spawn } from 'child_process'
+import { spawn, spawnSync } from 'child_process'
 import { createHash } from 'crypto'
 import path from 'path'
 import { app } from 'electron'
@@ -7,6 +7,8 @@ import { dataDir } from '../utils/dirs'
 import { getAppConfig, patchAppConfig } from '../config'
 import { loadUpdateCache, saveUpdateCache } from '../utils/update-cache'
 import { fetchGithub } from '../utils/github'
+import { getZapretStatus, stopZapret } from './zapret'
+import { stopTgws } from './tgws'
 
 const DEFAULT_REPO = 'slavniynazzik/SkipNet'
 
@@ -31,6 +33,33 @@ const REQUEST_HEADERS: Record<string, string> = {
 }
 
 export const UPGRADE_MARKER_NAME = '.skipnet-upgrade'
+
+// One-shot flag in userData: "Zapret was running when the user installed an
+// update". The updater has to stop winws.exe before NSIS can replace the
+// install folder (otherwise a locked .exe aborts the in-place upgrade), so the
+// new instance reads this flag on startup and turns the bypass back on.
+const RESUME_ZAPRET_MARKER = 'resume-zapret-after-update'
+
+export function markResumeZapretAfterUpdate(): void {
+  try {
+    mkdirSync(dataDir(), { recursive: true })
+    writeFileSync(path.join(dataDir(), RESUME_ZAPRET_MARKER), `${Date.now()}\n`, 'utf8')
+  } catch {
+    /* best-effort: the update itself must not be blocked */
+  }
+}
+
+/** Returns true once if the previous instance asked to restore Zapret. */
+export function consumeResumeZapretAfterUpdate(): boolean {
+  const file = path.join(dataDir(), RESUME_ZAPRET_MARKER)
+  try {
+    if (!existsSync(file)) return false
+    unlinkSync(file)
+    return true
+  } catch {
+    return false
+  }
+}
 
 export interface AppUpdateInfo {
   installed: string
@@ -317,11 +346,42 @@ export async function installAppUpdate(
     }
   }
 
+  // NSIS replaces the whole install directory during an in-place upgrade and
+  // aborts if any file inside it is still in use. winws.exe runs from
+  // `<install>\resources\zapret\bin`, so leaving Zapret on made the upgrade
+  // fail silently (the app quit, nothing was installed and nothing came
+  // back). Stop both helpers before the installer starts; remember that
+  // Zapret was on so the new instance can restore it.
+  try {
+    const state = getZapretStatus().state
+    if (state === 'running' || state === 'starting') {
+      markResumeZapretAfterUpdate()
+    }
+  } catch {
+    /* best-effort */
+  }
+  await Promise.all([stopZapret().catch(() => void 0), stopTgws().catch(() => void 0)])
+  // Belt and braces: kill anything still holding the bundle open.
+  for (const image of ['winws.exe', 'TgWsProxy_windows.exe']) {
+    try {
+      spawnSync('taskkill.exe', ['/F', '/IM', image, '/T'], {
+        windowsHide: true,
+        timeout: 5000
+      })
+    } catch {
+      /* noop */
+    }
+  }
+
   // Spawn detached so the installer survives our app.quit(). Wait for the
   // actual spawn outcome before shutting down: if the installer cannot be
   // started (AV block, deleted file, EACCES) the app used to quit anyway,
   // leaving nothing installing and nothing running.
-  const child = spawn(installerPath, ['/S', '--updated'], {
+  //
+  // `--force-run` is what makes the assisted installer start SkipNet again
+  // after a *silent* (/S) update: without it electron-builder only relaunches
+  // from the finish page, which never appears in silent mode.
+  const child = spawn(installerPath, ['/S', '--updated', '--force-run'], {
     detached: true,
     stdio: 'ignore',
     windowsHide: true
@@ -347,10 +407,12 @@ export async function installAppUpdate(
   child.on('error', (e) => console.error('[app-updater] installer error:', e))
   child.unref()
 
-  // Re-launch watcher. With `oneClick: false` (assisted installer) the
-  // built-in `--updated` relaunch flag is unreliable when the installer
-  // runs elevated, so we maintain our own watcher: poll the installer
-  // PID, wait for SkipNet.exe to settle, then start it.
+  // Re-launch watcher. `--force-run` lets the installer start SkipNet after a
+  // silent update, but NSIS can still abort (AV lock, user policy, aborted
+  // upgrade). This second, independent watcher makes sure the app comes back
+  // either way: wait for the installer, give the installer's own launch a
+  // moment, then start SkipNet only if no instance is running, retrying a few
+  // times so a slow Defender scan cannot swallow the launch.
   if (installerPid) {
     try {
       const exePath = process.execPath
@@ -363,45 +425,54 @@ export async function installAppUpdate(
         `$exe = '${exePath.replace(/'/g, "''")}'`,
         `$exeDir = '${exeDir.replace(/'/g, "''")}'`,
         `$logPath = '${logPath.replace(/'/g, "''")}'`,
-        // Diagnostic log — survives even if the relaunch fails so we
-        // can ask users to attach %TEMP%\SkipNet-relaunch-*.log when
-        // a future bug report comes in.
         'function Log($m) {',
         "  try { Add-Content -LiteralPath $logPath -Value \"$([DateTime]::Now.ToString('HH:mm:ss.fff')) $m\" } catch {}",
         '}',
+        'function AppRunning() {',
+        '  return [bool](Get-Process -Name SkipNet -ErrorAction SilentlyContinue)',
+        '}',
         'Log "watcher started, installerPid=$installerPid exe=$exe"',
-        // 1) Wait for the installer to finish (up to 5 min — silent NSIS
+        // 1) Wait for the installer to finish (up to 10 min — silent NSIS
         //    upgrades take 5–15s but slow disks / AV may stretch it).
-        '$deadline = (Get-Date).AddMinutes(5)',
+        '$deadline = (Get-Date).AddMinutes(10)',
         'while ((Get-Date) -lt $deadline) {',
         '  if (-not (Get-Process -Id $installerPid -ErrorAction SilentlyContinue)) { Log "installer exited"; break }',
         '  Start-Sleep -Milliseconds 500',
         '}',
-        // 2) Defender often holds the freshly-written SkipNet.exe for a
-        //    few seconds for an on-write scan; 1s wasn't always enough.
-        'Start-Sleep -Seconds 3',
+        // 2) Defender often holds the freshly-written SkipNet.exe for a few
+        //    seconds for an on-write scan; give the installer's own relaunch
+        //    (--force-run) time to happen before we interfere.
+        'Start-Sleep -Seconds 5',
+        'if (AppRunning) { Log "app already running — watcher done"; exit 0 }',
         // 3) Wait until the new exe actually exists on disk.
-        '$filePoll = (Get-Date).AddSeconds(60)',
+        '$filePoll = (Get-Date).AddSeconds(90)',
         'while ((Get-Date) -lt $filePoll -and -not (Test-Path -LiteralPath $exe)) {',
         '  Start-Sleep -Milliseconds 500',
         '}',
         'if (-not (Test-Path -LiteralPath $exe)) { Log "exe missing at $exe — giving up"; exit 1 }',
-        // 4) Try to launch via Start-Process first (preferred — surfaces
-        //    in the user's interactive session). If that throws, fall
-        //    back to the .NET Process API which goes through CreateProcess
-        //    directly.
-        'try {',
-        '  Start-Process -FilePath $exe -WorkingDirectory $exeDir',
-        '  Log "Start-Process OK"',
-        '} catch {',
-        '  Log "Start-Process failed: $_ — trying .NET fallback"',
+        // 4) Launch, then verify it stayed alive. A process that appears and
+        //    disappears is usually the single-instance lock rejecting a
+        //    duplicate while the installer's own copy is starting — retry.
+        'for ($i = 1; $i -le 6; $i++) {',
+        '  if (AppRunning) { Log "app is running (attempt $i)"; exit 0 }',
         '  try {',
-        '    [System.Diagnostics.Process]::Start($exe) | Out-Null',
-        '    Log "Process.Start OK"',
+        '    Start-Process -FilePath $exe -WorkingDirectory $exeDir',
+        '    Log "Start-Process OK (attempt $i)"',
         '  } catch {',
-        '    Log "all relaunch attempts failed: $_"',
+        '    Log "Start-Process failed: $_ — trying .NET fallback"',
+        '    try {',
+        '      [System.Diagnostics.Process]::Start($exe) | Out-Null',
+        '      Log "Process.Start OK (attempt $i)"',
+        '    } catch {',
+        '      Log "launch failed (attempt $i): $_"',
+        '    }',
         '  }',
-        '}'
+        '  Start-Sleep -Seconds 5',
+        '  if (AppRunning) { Log "relaunch confirmed (attempt $i)"; exit 0 }',
+        '  Log "app not running after attempt $i"',
+        '}',
+        'Log "all relaunch attempts failed"',
+        'exit 1'
       ].join('\n')
       const watcherPath = path.join(dir, `SkipNet-relaunch-${ts}.ps1`)
       // Prepend BOM so PowerShell reads the script as UTF-8 even on
