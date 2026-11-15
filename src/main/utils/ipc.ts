@@ -47,6 +47,19 @@ import {
   setGameFilter,
   type SetGameFilterInput
 } from '../core/zapret-settings'
+import { getFakesStatus, replaceActiveFake, type FakeKind } from '../core/zapret-fakes'
+import { checkZapretHosts, prepareHostsUpdate } from '../core/zapret-hosts'
+import {
+  runZapretDiagnostics,
+  fixTcpTimestamps,
+  fixWindivertConflict,
+  removeConflictingBypasses,
+  getAutoUpdateCheck,
+  setAutoUpdateCheck,
+  runZapretTests,
+  clearDiscordCache,
+  type DiagFixId
+} from '../core/zapret-diagnostics'
 import {
   checkTgwsUpdate,
   installTgwsUpdate,
@@ -266,6 +279,41 @@ export function registerIpcMainHandlers(): void {
       mode === 'none' || mode === 'loaded' || mode === 'any' ? mode : 'loaded'
     return setIpSetMode(value)
   }))
+
+  // ---- Zapret active fakes ------------------------------------------------
+  ipcMain.handle('zapret:getFakes', h(() => getFakesStatus()))
+  ipcMain.handle('zapret:replaceFake', h((kind, name) => {
+    const value: FakeKind = kind === 'game' ? 'game' : 'discord'
+    return replaceActiveFake(value, String(name ?? ''))
+  }))
+
+  // ---- Zapret hosts / diagnostics / maintenance ---------------------------
+  ipcMain.handle('zapret:checkHosts', h(() => checkZapretHosts()))
+  ipcMain.handle('zapret:prepareHostsUpdate', h(() => prepareHostsUpdate()))
+  ipcMain.handle('zapret:diagnostics', h(() => runZapretDiagnostics()))
+  ipcMain.handle('zapret:diagnosticsFix', h((fix) => {
+    const id = fix as DiagFixId
+    if (id === 'tcpTimestamps') return fixTcpTimestamps()
+    if (id === 'windivert') return fixWindivertConflict()
+    if (id === 'conflictingBypasses') return removeConflictingBypasses()
+    if (id === 'discordCache') {
+      const r = clearDiscordCache()
+      return { ok: r.failed.length === 0, message: r.found ? 'Кэш Discord очищен.' : 'Discord не найден.' }
+    }
+    return { ok: false, message: 'Неизвестное действие.' }
+  }))
+  ipcMain.handle('zapret:getAutoUpdateCheck', h(() => getAutoUpdateCheck()))
+  ipcMain.handle('zapret:setAutoUpdateCheck', h(async (enabled) => {
+    const value = Boolean(enabled)
+    const actual = setAutoUpdateCheck(value)
+    const cfg = await getAppConfig()
+    if (cfg.zapret) {
+      await patchAppConfig({ zapret: { ...(cfg.zapret as ZapretConfig), checkUpdates: value } })
+    }
+    return actual
+  }))
+  ipcMain.handle('zapret:runTests', h(() => runZapretTests()))
+  ipcMain.handle('zapret:clearDiscordCache', h(() => clearDiscordCache()))
 
   // ---- SkipNet self-update ----------------------------------------------
   ipcMain.handle('app:checkUpdate', h((force) => checkAppUpdate(Boolean(force))))

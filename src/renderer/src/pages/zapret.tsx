@@ -24,6 +24,8 @@ import BasePage from '@renderer/components/base/base-page'
 import SwitcherCard from '@renderer/components/switcher-card'
 import ZapretIpListCard from '@renderer/components/zapret-iplist-card'
 import ZapretNetworkCard from '@renderer/components/zapret-network-card'
+import ZapretMaintenanceCard from '@renderer/components/zapret-maintenance-card'
+import ZapretFakesCard from '@renderer/components/zapret-fakes-card'
 
 const Zapret: React.FC = () => {
   const status = useZapretStore((s) => s.status)
@@ -73,10 +75,6 @@ const Zapret: React.FC = () => {
 
   useEffect(() => {
     refreshStrategies()
-    // Don't await; banner just stays hidden if the API call fails (rate-
-    // limit, offline, etc.) — surfacing a network error here would be
-    // noise for users who never asked to check.
-    zapretCheckUpdate(false).then(setUpdateInfo).catch(() => setUpdateInfo(null))
 
     const t = setTimeout(() => {
       if (autoTestStartedRef.current) return
@@ -91,6 +89,18 @@ const Zapret: React.FC = () => {
     }, 250)
     return () => clearTimeout(t)
   }, [])
+
+  // Automatic update check can be disabled from "Обслуживание и диагностика".
+  // Don't await; the banner just stays hidden on network errors (rate-limit,
+  // offline, etc.) — surfacing that would be noise for a background check.
+  const checkUpdatesEnabled = zapret?.checkUpdates !== false
+  useEffect(() => {
+    if (!checkUpdatesEnabled) {
+      setUpdateInfo(null)
+      return
+    }
+    zapretCheckUpdate(false).then(setUpdateInfo).catch(() => setUpdateInfo(null))
+  }, [checkUpdatesEnabled])
 
   const showBanner = !!updateInfo && updateInfo.hasUpdate && !updateInfo.dismissed && !!updateInfo.assetUrl
 
@@ -286,6 +296,26 @@ const Zapret: React.FC = () => {
         disabledReason={
           isTestRunning
             ? 'Идёт тестирование стратегий — настройки фильтров временно недоступны'
+            : 'Подождите завершения переключения Zapret'
+        }
+      />
+
+      <ZapretMaintenanceCard
+        refreshKey={bundleRefreshKey}
+        disabled={isTestRunning || status.state === 'starting' || status.state === 'stopping'}
+        disabledReason={
+          isTestRunning
+            ? 'Идёт тестирование стратегий — обслуживание временно недоступно'
+            : 'Подождите завершения переключения Zapret'
+        }
+      />
+
+      <ZapretFakesCard
+        refreshKey={bundleRefreshKey}
+        disabled={isTestRunning || status.state === 'starting' || status.state === 'stopping'}
+        disabledReason={
+          isTestRunning
+            ? 'Идёт тестирование стратегий — замена фейков временно недоступна'
             : 'Подождите завершения переключения Zapret'
         }
       />

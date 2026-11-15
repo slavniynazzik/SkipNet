@@ -219,6 +219,85 @@ export const zapretGetIpSetMode = (): Promise<IpSetModeStatus> =>
 export const zapretSetIpSetMode = (mode: IpSetMode): Promise<IpSetModeStatus> =>
   invoke('zapret:setIpSetMode', mode)
 
+// ---- Zapret active fakes --------------------------------------------------
+export type FakeKind = 'discord' | 'game'
+export interface FakeFile {
+  name: string
+  path: string
+  hash: string
+  size: number
+}
+export interface ActiveFakeSlot {
+  current: string | null
+  activePath: string
+  exists: boolean
+}
+export interface FakesStatus {
+  available: boolean
+  binDir: string
+  fakes: FakeFile[]
+  discord: ActiveFakeSlot
+  game: ActiveFakeSlot
+}
+export const zapretGetFakes = (): Promise<FakesStatus> => invoke('zapret:getFakes')
+export const zapretReplaceFake = (kind: FakeKind, name: string): Promise<FakesStatus> =>
+  invoke('zapret:replaceFake', kind, name)
+
+// ---- Zapret hosts / diagnostics / maintenance -----------------------------
+export interface HostsCheckResult {
+  hostsPath: string
+  hostsExists: boolean
+  upToDate: boolean
+  needsUpdate: boolean
+  firstLine: string
+  lastLine: string
+  entries: number
+  tempPath?: string
+}
+export type DiagStatus = 'ok' | 'warn' | 'fail' | 'info'
+export type DiagFixId = 'tcpTimestamps' | 'windivert' | 'conflictingBypasses' | 'discordCache'
+export interface DiagCheck {
+  id: string
+  title: string
+  status: DiagStatus
+  detail?: string
+  hint?: string
+  fix?: DiagFixId
+}
+export interface DiagnosticsReport {
+  generatedAt: number
+  checks: DiagCheck[]
+}
+export interface DiagnosticsFixResult {
+  ok: boolean
+  message: string
+}
+export interface RunTestsResult {
+  started: boolean
+  script: string
+  message: string
+}
+export interface DiscordCacheResult {
+  closed: string[]
+  cleared: string[]
+  failed: string[]
+  found: boolean
+}
+export const zapretCheckHosts = (): Promise<HostsCheckResult> => invoke('zapret:checkHosts')
+export const zapretPrepareHostsUpdate = (): Promise<HostsCheckResult> =>
+  invoke('zapret:prepareHostsUpdate')
+export const zapretRunDiagnostics = (): Promise<DiagnosticsReport> =>
+  invoke('zapret:diagnostics')
+export const zapretDiagnosticsFix = (fix: DiagFixId): Promise<DiagnosticsFixResult> =>
+  invoke('zapret:diagnosticsFix', fix)
+export const zapretGetAutoUpdateCheck = (): Promise<boolean> =>
+  invoke('zapret:getAutoUpdateCheck')
+export const zapretSetAutoUpdateCheck = (enabled: boolean): Promise<boolean> =>
+  invoke('zapret:setAutoUpdateCheck', enabled)
+export const zapretRunTests = (): Promise<RunTestsResult> => invoke('zapret:runTests')
+export const zapretClearDiscordCache = (): Promise<DiscordCacheResult> =>
+  invoke('zapret:clearDiscordCache')
+
 // ---- SkipNet self-update ---------------------------------------------------
 export interface AppUpdateInfo {
   installed: string

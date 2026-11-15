@@ -84,6 +84,9 @@ interface ZapretConfig {
   gameFilterTcpRange?: string      // e.g. '1024-65535' or '1024-1934,1936-65535'
   gameFilterUdpRange?: string
   ipsetMode?: 'none' | 'loaded' | 'any'
+  // Automatic Zapret update check (banner on the Zapret page). Mirrors
+  // `utils/check_updates.enabled` in the bundle.
+  checkUpdates?: boolean
   bundlePath?: string              // override path to unpacked zapret folder
   useService?: boolean             // installed as Windows service
   // Version of the unpacked Flowseal/zapret-discord-youtube bundle in
