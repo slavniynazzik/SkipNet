@@ -549,5 +549,3 @@ export function silentBackgroundCheck(): void {
 export function invalidateAppUpdateCache(): void {
   cache = null
 }
-
-void dataDir // keep import slot, used implicitly via update-cache

@@ -35,15 +35,24 @@ const TelegramPage: React.FC = () => {
   const { appConfig, patchAppConfig } = useAppConfig()
   const [link, setLink] = useState('')
   const [portDraft, setPortDraft] = useState('')
+  const [hostDraft, setHostDraft] = useState('')
+  const [secretDraft, setSecretDraft] = useState('')
   const tgws = appConfig?.tgws
 
-  // Keep a local text draft for the port field so the input can be cleared
-  // while retyping. The old handler wrote `Number('') || 1443` on every
-  // keystroke, making the field impossible to empty and persisting invalid
-  // intermediate ports.
+  // Keep local text drafts for every editable field. Writing the config on
+  // each keystroke makes SWR revalidate concurrently with typing, so a stale
+  // response can reset the input and drop characters. Drafts are committed on
+  // blur / Enter instead. Port additionally needs a draft so it can be
+  // cleared while retyping.
   useEffect(() => {
     setPortDraft(String(tgws?.port ?? 1443))
   }, [tgws?.port])
+  useEffect(() => {
+    setHostDraft(tgws?.host ?? '')
+  }, [tgws?.host])
+  useEffect(() => {
+    setSecretDraft(tgws?.secret ?? '')
+  }, [tgws?.secret])
 
   const commitPort = (): void => {
     const parsed = Number(portDraft)
@@ -53,7 +62,36 @@ const TelegramPage: React.FC = () => {
     }
     setPortDraft(String(parsed))
     if (parsed !== (tgws?.port ?? 1443)) {
-      void patchAppConfig({ tgws: { ...tgws!, port: parsed } })
+      void patchAppConfig({ tgws: { port: parsed } as TgwsConfig })
+    }
+  }
+
+  const commitHost = (): void => {
+    const value = hostDraft.trim()
+    if (!value) {
+      setHostDraft(tgws?.host ?? '')
+      return
+    }
+    setHostDraft(value)
+    if (value !== (tgws?.host ?? '')) {
+      void patchAppConfig({ tgws: { host: value } as TgwsConfig })
+    }
+  }
+
+  const commitSecret = (): void => {
+    const value = secretDraft.trim()
+    if (!/^[0-9a-fA-F]{32}$/.test(value)) {
+      // The main process regenerates anything that is not 32 hex chars on
+      // start, which would silently change the user's link. Reject it here.
+      toast.error('Некорректный секретный ключ', {
+        description: 'Нужно ровно 32 hex-символа (0–9, a–f).'
+      })
+      setSecretDraft(tgws?.secret ?? '')
+      return
+    }
+    setSecretDraft(value)
+    if (value !== (tgws?.secret ?? '')) {
+      void patchAppConfig({ tgws: { secret: value } as TgwsConfig })
     }
   }
 
@@ -62,6 +100,9 @@ const TelegramPage: React.FC = () => {
   }, [tgws?.host, tgws?.port, tgws?.secret, status.state])
 
   const running = status.state === 'running'
+  // The updater stops the proxy when it is running OR starting; remember both
+  // so an install during startup does not leave it switched off afterwards.
+  const restartAfterMutation = running || status.state === 'starting'
 
   // ---- Auto-update banner
   const [updateInfo, setUpdateInfo] = useState<TgwsUpdateInfo | null>(null)
@@ -102,7 +143,7 @@ const TelegramPage: React.FC = () => {
       setUpdateInfo(fresh)
       // If the proxy was running we already stopped it server-side to free
       // the .exe write lock; restart it so the user doesn't have to.
-      if (running) {
+      if (restartAfterMutation) {
         try { await tgwsStart() } catch { /* user can retry from the toggle */ }
       }
     } catch (e) {
@@ -163,7 +204,7 @@ const TelegramPage: React.FC = () => {
       } catch {
         setLink('')
       }
-      if (running) {
+      if (restartAfterMutation) {
         await tgwsRestart().catch(() => void 0)
       }
       toast.success('Ключ и ссылка изменены', { style: POWER_ON_TOAST_STYLE })
@@ -218,8 +259,9 @@ const TelegramPage: React.FC = () => {
           subtitle={`${tgws?.host ?? '127.0.0.1'}:${tgws?.port ?? 1443}`}
           version={tgws?.installedVersion ?? updateInfo?.installed ?? BUNDLED_TGWS_VERSION}
           status={status}
+          disabled={installing}
           onToggle={(v) => (v ? tgwsStart() : tgwsStop()).catch(() => void 0)}
-          footer={running ? null : 'Нажмите для запуска'}
+          footer={installing ? 'Устанавливаем обновление…' : running ? null : 'Нажмите для запуска'}
         />
 
         <div className="flex items-center justify-between gap-3 rounded-lg border border-stroke bg-card/40 px-4 py-2">
@@ -307,8 +349,12 @@ const TelegramPage: React.FC = () => {
           <div className="space-y-1.5">
             <Label>Хост</Label>
             <Input
-              value={tgws?.host ?? ''}
-              onChange={(e) => patchAppConfig({ tgws: { ...tgws!, host: e.target.value } })}
+              value={hostDraft}
+              onChange={(e) => setHostDraft(e.target.value)}
+              onBlur={commitHost}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') e.currentTarget.blur()
+              }}
               placeholder="127.0.0.1"
             />
           </div>
@@ -329,8 +375,13 @@ const TelegramPage: React.FC = () => {
           <div className="md:col-span-2 space-y-1.5">
             <Label>Секретный ключ (32-hex MTProto)</Label>
             <Input
-              value={tgws?.secret ?? ''}
-              onChange={(e) => patchAppConfig({ tgws: { ...tgws!, secret: e.target.value.trim() } })}
+              value={secretDraft}
+              onChange={(e) => setSecretDraft(e.target.value)}
+              onBlur={commitSecret}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') e.currentTarget.blur()
+              }}
+              spellCheck={false}
               className="font-mono text-xs"
             />
           </div>

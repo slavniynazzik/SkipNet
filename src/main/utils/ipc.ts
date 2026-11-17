@@ -170,7 +170,31 @@ function openTgLinkViaScheduler(url: string, fellBack: { v: boolean }): boolean 
 const TG_INFLIGHT_LOCK_MS = 600
 let tgInflightUntil = 0
 
+/**
+ * The renderer only ever needs to open a generated `tg://proxy` link, but the
+ * handler is reachable with any string. Restrict it to Telegram URLs so it
+ * cannot be used to launch an arbitrary local file or protocol handler at the
+ * app's (elevated) integrity level.
+ */
+function isAllowedTelegramUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url)
+    if (parsed.protocol === 'tg:') return true
+    return (
+      parsed.protocol === 'https:' &&
+      (parsed.hostname === 't.me' || parsed.hostname === 'telegram.me')
+    )
+  } catch {
+    return false
+  }
+}
+
 function openTelegramLink(url: string): Promise<void> {
+  if (!isAllowedTelegramUrl(url)) {
+    // Never log the URL itself: a proxy link contains the MTProto secret.
+    logTgError('rejected url', null, 'unsupported scheme/host')
+    return Promise.resolve()
+  }
   const now = Date.now()
   if (now < tgInflightUntil) return Promise.resolve()
   tgInflightUntil = now + TG_INFLIGHT_LOCK_MS

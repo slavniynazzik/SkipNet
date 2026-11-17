@@ -77,9 +77,21 @@ export async function installZapretBundle(
   }
 
   // Stop a running winws.exe before touching the bundle directory; locked
-  // files on Windows would otherwise make rmSync fail with EBUSY.
-  if (status.state === 'running' || status.state === 'starting') {
+  // files on Windows would otherwise make rmSync fail with EBUSY. The tracked
+  // status can be stale (orphan winws.exe from a crashed session), so also
+  // probe the process table.
+  if (
+    status.state === 'running' ||
+    status.state === 'starting' ||
+    (await isWinwsRunning())
+  ) {
     try { await stopZapret() } catch { /* best-effort */ }
+  }
+  // `stopZapret` already kills winws.exe, but an orphan that appeared between
+  // the probe above and the kill would keep both the .exe and the WinDivert
+  // .sys locked. One more synchronous kill makes the sc delete safe.
+  if (await isWinwsRunning()) {
+    try { await killWinws() } catch { /* best-effort */ }
   }
 
   if (process.platform === 'win32') {
@@ -257,7 +269,12 @@ interface ScQueryResult {
 function scQueryOne(name: string): ScQueryResult {
   const q = spawnSync('sc.exe', ['query', name], { windowsHide: true, timeout: 2000, encoding: 'utf8' })
   if (q.status !== 0 || !q.stdout) return { exists: false, state: 'unknown', binaryPath: null }
-  const stateMatch = q.stdout.match(/STATE\s*:\s*\d+\s+(\w+)/i)
+  // `sc.exe` localises the field label (STATE / СОСТОЯНИЕ / …) but keeps the
+  // numeric state and the English RUNNING token. Match the value only so the
+  // status is correct on non-English Windows too.
+  const stateMatch =
+    q.stdout.match(/STATE\s*:\s*\d+\s+(\w+)/i) ??
+    q.stdout.match(/:\s*\d+\s+([A-Z_]+)\s*$/im)
   const stateRaw = (stateMatch?.[1] ?? '').toLowerCase()
   const state: ScQueryResult['state'] =
     stateRaw === 'running' ? 'running' :
@@ -265,9 +282,12 @@ function scQueryOne(name: string): ScQueryResult {
     stateRaw === 'start_pending' ? 'start_pending' :
     stateRaw === 'stop_pending' ? 'stop_pending' : 'unknown'
   // `sc qc` exposes BINARY_PATH_NAME — needed so we can detect a stale
-  // registration pointing at a previous install directory.
+  // registration pointing at a previous install directory. The label is
+  // localised, so fall back to the first path that ends in `.sys`.
   const qc = spawnSync('sc.exe', ['qc', name], { windowsHide: true, timeout: 2000, encoding: 'utf8' })
-  const pathMatch = qc.stdout?.match(/BINARY_PATH_NAME\s*:\s*(.+)$/im)
+  const pathMatch =
+    qc.stdout?.match(/BINARY_PATH_NAME\s*:\s*(.+)$/im) ??
+    qc.stdout?.match(/:\s*([A-Za-z]:\\.*?\.sys)\s*$/im)
   return {
     exists: true,
     state,
@@ -412,7 +432,16 @@ async function startZapretImpl(): Promise<void> {
     throw new Error('no active zapret strategy configured')
   }
   const dir = zapretBundleDir()
-  const batPath = path.join(dir, z.activeStrategy)
+  // `activeStrategy` is a plain file name from `listStrategies()`. Reject
+  // anything with a directory component so a corrupted/tampered config can
+  // never make us spawn an arbitrary elevated `.bat` outside the bundle.
+  const strategy = z.activeStrategy
+  if (path.basename(strategy) !== strategy || !/^general.*\.bat$/i.test(strategy)) {
+    setStatus({ state: 'error', lastError: `invalid strategy: ${strategy}` })
+    log('error', `invalid strategy: ${strategy}`)
+    throw new Error(`invalid zapret strategy: ${strategy}`)
+  }
+  const batPath = path.join(dir, strategy)
   if (!existsSync(batPath)) {
     setStatus({ state: 'error', lastError: `strategy not found: ${batPath}` })
     log('error', `strategy not found: ${batPath}`)
@@ -446,7 +475,7 @@ async function startZapretImpl(): Promise<void> {
   // .bat files were patched at install time to drop `start /min`, so winws.exe
   // is now a direct child of cmd — no visible window, no taskbar icon, and
   // the whole tree can be killed via taskkill /F /T /PID.
-  child = spawn('cmd.exe', ['/c', batPath], {
+  const proc = spawn('cmd.exe', ['/c', batPath], {
     cwd: dir,
     windowsHide: true,
     detached: false,
@@ -457,28 +486,34 @@ async function startZapretImpl(): Promise<void> {
       NO_UPDATE_CHECK: '1'
     }
   })
-  child.stdout?.on('data', (buf) => {
+  child = proc
+  proc.stdout?.on('data', (buf) => {
     const s = buf.toString()
     log('info', s.trimEnd())
     for (const line of s.split(/\r?\n/)) ingestWinwsLine(line)
   })
-  child.stderr?.on('data', (buf) => {
+  proc.stderr?.on('data', (buf) => {
     const s = buf.toString()
     log('warn', s.trimEnd())
     for (const line of s.split(/\r?\n/)) ingestWinwsLine(line)
   })
-  child.on('error', (err) => {
+  proc.on('error', (err) => {
     log('error', `child error: ${err.message}`)
+    if (child !== proc) return
     setStatus({ state: 'error', lastError: err.message })
     child = null
   })
-  child.on('exit', (code, signal) => {
+  proc.on('exit', (code, signal) => {
     log('info', `zapret exited code=${code} signal=${signal ?? 'none'}`)
-    child = null
+    // A late exit from an older cmd.exe must not overwrite the status of the
+    // currently running instance (or null out its `child` reference).
+    const isCurrent = child === proc
+    if (isCurrent) child = null
     if (exitStatusSuppressed) {
       exitStatusSuppressed = false
       return
     }
+    if (!isCurrent) return
     if (stopRequested) {
       setStatus({ state: 'stopped', pid: undefined, lastError: undefined })
     } else {

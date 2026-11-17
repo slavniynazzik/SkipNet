@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { toast } from 'sonner'
 import { Loader2, RefreshCw } from 'lucide-react'
 import { useAppConfig } from '@renderer/hooks/use-app-config'
@@ -30,6 +30,7 @@ const themeLabels: Record<AppTheme, string> = {
 const Settings: React.FC = () => {
   const { appConfig, patchAppConfig } = useAppConfig()
   const [checkingUpdates, setCheckingUpdates] = useState(false)
+  const checkingRef = useRef(false)
   const [appVersion, setAppVersion] = useState<string | null>(null)
 
   useEffect(() => {
@@ -37,7 +38,8 @@ const Settings: React.FC = () => {
   }, [])
 
   const checkUpdates = async (): Promise<void> => {
-    if (checkingUpdates) return
+    if (checkingRef.current) return
+    checkingRef.current = true
     setCheckingUpdates(true)
     try {
       const [tgws, zapret, app] = await Promise.allSettled([
@@ -94,6 +96,7 @@ const Settings: React.FC = () => {
         })
       }
     } finally {
+      checkingRef.current = false
       setCheckingUpdates(false)
     }
   }
@@ -149,8 +152,9 @@ const Settings: React.FC = () => {
             <Label className="text-sm">Автозапуск Telegram</Label>
             <Switch
               checked={appConfig?.tgws?.autoStart ?? false}
+              disabled={!appConfig?.tgws}
               onCheckedChange={(v) =>
-                patchAppConfig({ tgws: { ...appConfig!.tgws!, autoStart: v } })
+                patchAppConfig({ tgws: { ...(appConfig?.tgws as TgwsConfig), autoStart: v } })
               }
             />
           </div>
@@ -158,8 +162,9 @@ const Settings: React.FC = () => {
             <Label className="text-sm">Автозапуск Zapret</Label>
             <Switch
               checked={appConfig?.zapret?.autoStart ?? false}
+              disabled={!appConfig?.zapret}
               onCheckedChange={(v) =>
-                patchAppConfig({ zapret: { ...appConfig!.zapret!, autoStart: v } })
+                patchAppConfig({ zapret: { ...(appConfig?.zapret as ZapretConfig), autoStart: v } })
               }
             />
           </div>
@@ -188,8 +193,8 @@ const Settings: React.FC = () => {
             <div className="flex flex-col">
               <Label className="text-sm">Убрать иконку с панели задач</Label>
               <span className="text-xs text-muted-foreground">
-                Не работает — если иконка в трее выключена, при нажатии на «X»
-                приложение полностью закрывается и завершает работу.
+                Не применяется, если иконка в трее выключена: в этом случае «X»
+                полностью закрывает приложение.
               </span>
             </div>
             <Switch

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { toast } from 'sonner'
 import { FolderOpen, Image, Layers, Loader2, RefreshCw, Video } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@renderer/components/ui/card'
@@ -36,6 +36,7 @@ const WallpaperCard: React.FC = () => {
   const [workshop, setWorkshop] = useState<WorkshopWallpaper[] | null>(null)
   const [listBusy, setListBusy] = useState(false)
   const [pickBusy, setPickBusy] = useState(false)
+  const autoLoadRef = useRef(false)
 
   // Ask the main process how the saved config actually resolves (missing
   // files, uninstalled Workshop items, scene fallbacks, ...).
@@ -101,6 +102,15 @@ const WallpaperCard: React.FC = () => {
     }
   }
 
+  // A saved Workshop wallpaper used to show an empty picker until the user
+  // pressed "Обновить список". Load the list once when that source is active.
+  useEffect(() => {
+    if (autoLoadRef.current) return
+    if (!wallpaper.enabled || wallpaper.source !== 'workshop') return
+    autoLoadRef.current = true
+    void loadWorkshop()
+  }, [wallpaper.enabled, wallpaper.source])
+
   const effectiveSource = wallpaper.source
   const selectedItem = workshop?.find((item) => item.id === wallpaper.workshopId)
 
@@ -131,10 +141,7 @@ const WallpaperCard: React.FC = () => {
                   key={value}
                   size="sm"
                   variant={effectiveSource === value ? 'default' : 'outline'}
-                  onClick={() => {
-                    patch({ source: value })
-                    if (value === 'workshop' && workshop === null) void loadWorkshop()
-                  }}
+                  onClick={() => patch({ source: value })}
                 >
                   <Icon className="h-3.5 w-3.5" />
                   {label}
@@ -232,7 +239,7 @@ const WallpaperCard: React.FC = () => {
                 min={10}
                 max={100}
                 suffix="%"
-                onChange={(value) => patch({ opacity: value })}
+                onCommit={(value) => patch({ opacity: value })}
               />
               <RangeField
                 label="Размытие"
@@ -240,7 +247,7 @@ const WallpaperCard: React.FC = () => {
                 min={0}
                 max={32}
                 suffix=" px"
-                onChange={(value) => patch({ blur: value })}
+                onCommit={(value) => patch({ blur: value })}
               />
               <RangeField
                 label="Затемнение"
@@ -248,7 +255,7 @@ const WallpaperCard: React.FC = () => {
                 min={0}
                 max={90}
                 suffix="%"
-                onChange={(value) => patch({ dim: value })}
+                onCommit={(value) => patch({ dim: value })}
               />
             </div>
 
@@ -271,25 +278,45 @@ const RangeField: React.FC<{
   min: number
   max: number
   suffix: string
-  onChange: (value: number) => void
-}> = ({ label, value, min, max, suffix, onChange }) => (
-  <label className="block">
-    <span className="mb-1 flex items-center justify-between text-[11px] text-muted-foreground">
-      <span>{label}</span>
-      <span className="font-mono">
-        {value}
-        {suffix}
+  /** Called once the drag/keyboard interaction ends, not on every pixel. */
+  onCommit: (value: number) => void
+}> = ({ label, value, min, max, suffix, onCommit }) => {
+  const [local, setLocal] = useState(value)
+  const committedRef = useRef(value)
+
+  useEffect(() => {
+    setLocal(value)
+    committedRef.current = value
+  }, [value])
+
+  const commit = (): void => {
+    if (local === committedRef.current) return
+    committedRef.current = local
+    onCommit(local)
+  }
+
+  return (
+    <label className="block">
+      <span className="mb-1 flex items-center justify-between text-[11px] text-muted-foreground">
+        <span>{label}</span>
+        <span className="font-mono">
+          {local}
+          {suffix}
+        </span>
       </span>
-    </span>
-    <input
-      type="range"
-      min={min}
-      max={max}
-      value={value}
-      onChange={(e) => onChange(Number(e.target.value))}
-      className="h-1.5 w-full cursor-pointer appearance-none rounded-full bg-muted accent-primary"
-    />
-  </label>
-)
+      <input
+        type="range"
+        min={min}
+        max={max}
+        value={local}
+        onChange={(e) => setLocal(Number(e.target.value))}
+        onPointerUp={commit}
+        onKeyUp={commit}
+        onBlur={commit}
+        className="h-1.5 w-full cursor-pointer appearance-none rounded-full bg-muted accent-primary"
+      />
+    </label>
+  )
+}
 
 export default WallpaperCard

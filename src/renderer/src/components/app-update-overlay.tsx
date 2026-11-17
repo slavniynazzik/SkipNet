@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Loader2, Download, Sparkles, X } from 'lucide-react'
 import {
   appCheckUpdate,
@@ -20,6 +20,7 @@ export default function AppUpdateOverlay(): React.ReactElement | null {
   const autoCheck = appConfig?.autoCheckUpdate !== false
   const [info, setInfo] = useState<AppUpdateInfo | null>(null)
   const [installing, setInstalling] = useState(false)
+  const installingRef = useRef(false)
   const [error, setError] = useState<string | null>(null)
   const [closing, setClosing] = useState(false)
 
@@ -71,7 +72,10 @@ export default function AppUpdateOverlay(): React.ReactElement | null {
     !closing
 
   const handleInstall = async (): Promise<void> => {
-    if (!info?.assetUrl) return
+    // Two clicks in the same tick would both see `installing === false` and
+    // start two ~100 MB downloads / two installers.
+    if (!info?.assetUrl || installingRef.current) return
+    installingRef.current = true
     setInstalling(true)
     setError(null)
     try {
@@ -79,6 +83,7 @@ export default function AppUpdateOverlay(): React.ReactElement | null {
       // Main process will quit SkipNet within ~1 s. We just keep the
       // spinner up; user perceives "downloading… closing…".
     } catch (e) {
+      installingRef.current = false
       setInstalling(false)
       setError(e instanceof Error ? e.message : String(e))
     }

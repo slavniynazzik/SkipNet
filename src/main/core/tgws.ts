@@ -265,20 +265,27 @@ async function startTgwsImpl(): Promise<void> {
     if (t.fakeTlsDomain) args.push('--fake-tls-domain', t.fakeTlsDomain)
 
     log('info', `spawning: ${bin} ${args.join(' ')}`)
-    child = spawn(bin, args, { windowsHide: true })
+    const proc = spawn(bin, args, { windowsHide: true })
+    child = proc
 
-    child.stdout?.on('data', (buf) => log('info', buf.toString().trimEnd()))
-    child.stderr?.on('data', (buf) => {
+    proc.stdout?.on('data', (buf) => log('info', buf.toString().trimEnd()))
+    proc.stderr?.on('data', (buf) => {
       const text = buf.toString().trimEnd()
       log(classifyStderr(text), text)
     })
-    child.on('error', (err) => {
+    proc.on('error', (err) => {
       log('error', `child error: ${err.message}`)
+      // Ignore events from a process we already replaced (e.g. a stop that
+      // timed out and a new start that began before the old exit arrived).
+      if (child !== proc) return
       setStatus({ state: 'error', lastError: err.message, pid: undefined })
       child = null
     })
-    child.on('exit', (code, signal) => {
+    proc.on('exit', (code, signal) => {
       log('info', `exited code=${code} signal=${signal ?? 'none'}`)
+      // A late exit from an older process must not clobber the state of the
+      // process that is currently running.
+      if (child !== proc) return
       // Any exit that happens while the user explicitly asked us to stop is
       // a clean stop, regardless of the OS-level exit code (`taskkill /F`
       // returns code=1, not signal=SIGTERM, on Windows).
@@ -296,11 +303,11 @@ async function startTgwsImpl(): Promise<void> {
     // Verify the process didn't immediately die. Tight window: TgWsProxy
     // either fails its bind() within tens of milliseconds or it's healthy.
     await new Promise((r) => setTimeout(r, 120))
-    if (!child || child.exitCode != null) {
+    if (child !== proc || proc.exitCode != null) {
       throw new Error('process died immediately after spawn')
     }
 
-    setStatus({ state: 'running', pid: child.pid })
+    setStatus({ state: 'running', pid: proc.pid })
     log('info', `✓ running (pid=${child.pid}) — secret persists across restarts`)
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)

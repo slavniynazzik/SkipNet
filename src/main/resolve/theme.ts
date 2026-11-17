@@ -41,14 +41,28 @@ export async function importThemes(files: string[]): Promise<void> {
   }
 }
 
+/**
+ * Resolve a theme name inside the themes folder. Returns null for names that
+ * escape it (`..\..\file`), so `theme:apply` cannot be used to read arbitrary
+ * files or inject their contents as CSS.
+ */
+function themeFile(theme: string): string | null {
+  const root = path.resolve(themesDir())
+  const full = path.resolve(root, theme)
+  if (full !== root && !full.startsWith(`${root}${path.sep}`)) return null
+  return full
+}
+
 export async function readTheme(theme: string): Promise<string> {
-  const full = path.join(themesDir(), theme)
-  if (!existsSync(full)) return ''
+  const full = themeFile(theme)
+  if (!full || !existsSync(full)) return ''
   return await readFile(full, 'utf-8')
 }
 
 export async function writeTheme(theme: string, css: string): Promise<void> {
-  await writeFile(path.join(themesDir(), theme), css)
+  const full = themeFile(theme)
+  if (!full) throw new Error('invalid theme name')
+  await writeFile(full, css)
 }
 
 export async function applyTheme(theme: string): Promise<void> {

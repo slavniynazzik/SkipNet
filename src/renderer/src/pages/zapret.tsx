@@ -47,8 +47,16 @@ const Zapret: React.FC = () => {
 
   // ---- Strategy test
   const testProgress = useZapretTestStore((s) => s.progress)
-  const testReport = useZapretTestStore((s) => s.report)
+  const storedReport = useZapretTestStore((s) => s.report)
   const isTestRunning = useZapretTestStore((s) => s.isRunning)
+  // A report produced for an older bundle keys results by `.bat` name, which
+  // may now point at a completely different strategy. Ignore it until the new
+  // bundle is tested, otherwise freshly-installed strategies stay disabled.
+  const reportIsStale =
+    !!storedReport?.bundleVersion &&
+    !!zapret?.installedVersion &&
+    storedReport.bundleVersion !== zapret.installedVersion
+  const testReport = reportIsStale ? null : storedReport
   const autoTestStartedRef = useRef(false)
 
   const refreshStrategies = (): void => {
@@ -95,11 +103,21 @@ const Zapret: React.FC = () => {
   // offline, etc.) — surfacing that would be noise for a background check.
   const checkUpdatesEnabled = zapret?.checkUpdates !== false
   useEffect(() => {
+    let cancelled = false
     if (!checkUpdatesEnabled) {
       setUpdateInfo(null)
       return
     }
-    zapretCheckUpdate(false).then(setUpdateInfo).catch(() => setUpdateInfo(null))
+    zapretCheckUpdate(false)
+      .then((info) => {
+        if (!cancelled) setUpdateInfo(info)
+      })
+      .catch(() => {
+        if (!cancelled) setUpdateInfo(null)
+      })
+    return () => {
+      cancelled = true
+    }
   }, [checkUpdatesEnabled])
 
   const showBanner = !!updateInfo && updateInfo.hasUpdate && !updateInfo.dismissed && !!updateInfo.assetUrl
@@ -192,8 +210,17 @@ const Zapret: React.FC = () => {
     // keyboard or a stale render, drop the request silently.
     const r = testReport?.results[file]
     if (r && r.tested && !r.passed) return
-    if (isTestRunning) return
+    if (isTestRunning || installing) return
     await patchAppConfig({ zapret: { ...zapret!, activeStrategy: file } })
+    // `patchAppConfig` reports errors as a toast but still resolves, so verify
+    // the write actually landed before auto-starting with the old strategy.
+    const fresh = await getAppConfig().catch(() => null)
+    if (fresh?.zapret?.activeStrategy !== file) {
+      toast.error('Не удалось сохранить стратегию', {
+        description: 'Попробуйте выбрать её ещё раз.'
+      })
+      return
+    }
     if (!autoStartRef.current) return
     // One-shot: drop the flag so re-clicking another strategy on this page
     // doesn't keep auto-starting and ping-ponging back to Home.
@@ -252,20 +279,22 @@ const Zapret: React.FC = () => {
           subtitle={active ?? 'Выберите стратегию ниже'}
           version={zapret?.installedVersion ?? updateInfo?.installed ?? BUNDLED_ZAPRET_VERSION}
           status={status}
-          disabled={isTestRunning}
+          disabled={isTestRunning || installing}
           onToggle={(v) => {
             if (v && !active) return
-            if (isTestRunning) return
+            if (isTestRunning || installing) return
             // Return the promise so SwitcherCard awaits the IPC roundtrip and
             // keeps the switch optimistically flipped/locked until done.
             return (v ? zapretStart() : zapretStop()).catch(() => void 0)
           }}
           footer={
-            isTestRunning
-              ? 'Идёт тестирование стратегий — переключатель временно недоступен'
-              : active
-                ? null
-                : 'Нужна стратегия'
+            installing
+              ? 'Устанавливаем обновление…'
+              : isTestRunning
+                ? 'Идёт тестирование стратегий — переключатель временно недоступен'
+                : active
+                  ? null
+                  : 'Нужна стратегия'
           }
         />
 
@@ -405,7 +434,7 @@ const Zapret: React.FC = () => {
             const isFailed = !!result && result.tested && !result.passed
             const isPassed = !!result && result.tested && result.passed
             const isBest = testReport?.bestStrategy === s.file
-            const disabled = isFailed || isTestRunning
+            const disabled = isFailed || isTestRunning || installing
             return (
               <button
                 key={s.file}

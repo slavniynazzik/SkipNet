@@ -30,7 +30,7 @@ const getSavedLanguage = (): string => {
   if (systemLang.startsWith('ru')) return 'ru-RU'
   if (systemLang.startsWith('en')) return 'en-US'
 
-  return 'ru-RU' // Default to Chinese
+  return 'ru-RU' // The UI is Russian-first; other languages are opt-in.
 }
 
 const savedLanguage = getSavedLanguage()

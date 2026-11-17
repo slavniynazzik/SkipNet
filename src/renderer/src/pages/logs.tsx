@@ -115,7 +115,7 @@ const Logs: React.FC = () => {
         <Virtuoso
           ref={virtuosoRef}
           data={filteredLogs}
-          initialTopMostItemIndex={filteredLogs.length - 1}
+          initialTopMostItemIndex={Math.max(0, filteredLogs.length - 1)}
           followOutput={trace}
           itemContent={(_i, log) => (
             <div className="px-4 py-0.5 flex gap-2 items-baseline hover:bg-accent/20">

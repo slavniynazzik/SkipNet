@@ -1,4 +1,4 @@
-import { installZapretBundle } from './zapret'
+import { getZapretStatus, installZapretBundle, listStrategies, startZapret } from './zapret'
 import { getAppConfig, patchAppConfig } from '../config'
 import { loadUpdateCache, saveUpdateCache } from '../utils/update-cache'
 import { fetchGithub } from '../utils/github'
@@ -69,7 +69,8 @@ interface GhRelease {
   assets?: GhAsset[]
 }
 
-// 12-hour cache, persisted to disk via update-cache helper so the very
+// 12-hour cache, persisted to disk via the update-cache helper so the next
+// launch can render the banner instantly instead of waiting for GitHub.
 let cache: { at: number; data: ZapretUpdateInfo } | null = null
 let cacheHydrated = false
 const CACHE_TTL_MS = 12 * 60 * 60 * 1000
@@ -196,6 +197,12 @@ export async function installZapretUpdate(
     }
   }
 
+  // `installZapretBundle` must stop winws.exe to replace the files. Remember
+  // whether bypassing was active so we can bring it back afterwards instead of
+  // silently leaving the user without a working bypass after an update.
+  const previous = getZapretStatus().state
+  const wasRunning = previous === 'running' || previous === 'starting'
+
   const result = await installZapretBundle(new Uint8Array(buf))
 
   const finalVersion =
@@ -207,6 +214,21 @@ export async function installZapretUpdate(
     dismissedUpdateTag: undefined
   }
   await patchAppConfig({ zapret: next })
+
+  if (wasRunning) {
+    // The selected strategy may not exist in the new bundle (upstream renames
+    // them), in which case starting would only produce an error — leave it
+    // stopped and let the user pick a fresh one.
+    const active = next.activeStrategy
+    const stillAvailable = !!active && listStrategies().some((s) => s.file === active)
+    if (stillAvailable) {
+      try {
+        await startZapret()
+      } catch {
+        /* surfaced through the Zapret status card */
+      }
+    }
+  }
 
   // Invalidate cache so a follow-up check reflects "up to date".
   cache = null

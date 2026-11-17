@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
@@ -280,8 +280,12 @@ const Home: React.FC = () => {
   }, [])
 
   const [reloading, setReloading] = useState(false)
+  const reloadingRef = useRef(false)
   const handleReloadAll = async (): Promise<void> => {
-    if (reloading) return
+    // The strategy sweep holds the Zapret lock for minutes; restarting under
+    // it would corrupt the test. Ref guard also blocks a same-tick double click.
+    if (reloadingRef.current || isZapretTesting) return
+    reloadingRef.current = true
     setReloading(true)
     try {
       const tasks: Promise<unknown>[] = []
@@ -320,6 +324,7 @@ const Home: React.FC = () => {
         description: e instanceof Error ? e.message : String(e)
       })
     } finally {
+      reloadingRef.current = false
       setReloading(false)
     }
   }
@@ -372,8 +377,12 @@ const Home: React.FC = () => {
             variant="outline"
             size="sm"
             onClick={handleReloadAll}
-            disabled={reloading}
-            title="Перезагрузить процессы"
+            disabled={reloading || isZapretTesting}
+            title={
+              isZapretTesting
+                ? 'Идёт тестирование стратегий — перезагрузка временно недоступна'
+                : 'Перезагрузить процессы'
+            }
           >
             <RotateCw className={`size-4 mr-1 ${reloading ? 'animate-spin' : ''}`} />
             Перезагрузить процессы

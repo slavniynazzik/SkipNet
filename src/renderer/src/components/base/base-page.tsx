@@ -1,11 +1,21 @@
 import { Button } from '@renderer/components/ui/button'
 import { platform } from '@renderer/utils/init'
 import WindowControls from '@renderer/components/window-controls'
+import { cn } from '@renderer/lib/utils'
 import React, { forwardRef, useImperativeHandle, useRef } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { ChevronLeft } from 'lucide-react'
 
-const sidebarPaths = new Set(['/home', '/profiles', '/proxies', '/connections', '/rules', '/logs', '/settings', '/about'])
+// Every page reachable from the sidebar. These are top-level sections, so the
+// header must not show a "back" arrow on them.
+const sidebarPaths = new Set([
+  '/home',
+  '/telegram',
+  '/zapret',
+  '/logs',
+  '/settings',
+  '/about'
+])
 const isMac = platform === 'darwin'
 
 interface Props {
@@ -49,7 +59,12 @@ const BasePage = forwardRef<HTMLDivElement, Props>((props, ref) => {
           </div>
         </div>
       </div>
-      <div className="content h-[calc(100vh-57px)] overflow-y-auto custom-scrollbar">
+      <div
+        className={cn(
+          'content h-[calc(100vh-57px)] overflow-y-auto custom-scrollbar',
+          props.contentClassName
+        )}
+      >
         {props.children}
       </div>
     </div>

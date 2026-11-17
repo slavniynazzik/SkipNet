@@ -436,6 +436,16 @@ export function fixTcpTimestamps(): DiagnosticsFixResult {
 }
 
 export function fixWindivertConflict(): DiagnosticsFixResult {
+  // Deleting the WinDivert service while our own winws.exe is capturing drops
+  // the driver under the active session and silently breaks bypassing until
+  // Zapret is restarted. The check only offers this fix when winws is down,
+  // but the handler is reachable directly, so guard here as well.
+  if (isWinwsRunning()) {
+    return {
+      ok: false,
+      message: 'Zapret уже запущен и использует WinDivert. Сначала остановите Zapret.'
+    }
+  }
   const messages: string[] = []
   for (const name of WINDIVERT_NAMES) {
     if (!serviceExists(name)) continue

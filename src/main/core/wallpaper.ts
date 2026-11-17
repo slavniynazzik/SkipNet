@@ -78,9 +78,17 @@ export interface WallpaperState {
 // `resolveWallpaper` and `listWorkshopWallpapers`.
 const allowedMedia = new Set<string>()
 
-function allow(file: string | undefined): void {
-  if (!file) return
-  allowedMedia.add(path.resolve(file).toLowerCase())
+/**
+ * Whitelist a file for the media protocol. Only real image/video extensions
+ * are accepted: without this check a wallpaper path pointing at, say,
+ * `config.yaml` would turn `skipnet-media://` into an arbitrary-file read.
+ */
+function allow(file: string | undefined): boolean {
+  if (!file) return false
+  const resolved = path.resolve(file)
+  if (!classify(resolved)) return false
+  allowedMedia.add(resolved.toLowerCase())
+  return true
 }
 
 function mediaUrl(file: string): string {
@@ -114,6 +122,9 @@ export function registerWallpaperScheme(): void {
 }
 
 function serveMedia(file: string, request: Request): Response {
+  // Defence in depth: even if a bad path somehow made it into the allow-list,
+  // never serve anything that is not an image or video.
+  if (!classify(file)) return new Response('forbidden', { status: 403 })
   let size = 0
   try {
     size = statSync(file).size
@@ -391,7 +402,7 @@ export async function pickWallpaperFile(): Promise<WallpaperPickResult> {
     : await dialog.showOpenDialog(options)
   if (result.canceled || !result.filePaths[0]) return {}
   const file = result.filePaths[0]
-  allow(file)
+  if (!allow(file)) return {}
   return { path: file, name: path.basename(file) }
 }
 
@@ -454,8 +465,17 @@ export function resolveWallpaper(config?: WallpaperConfig): WallpaperState {
         dim
       }
     }
-    allow(file)
-    const kind = classify(file) ?? 'image'
+    const kind = classify(file)
+    if (!kind || !allow(file)) {
+      return {
+        enabled: true,
+        kind: 'none',
+        note: 'Формат файла не поддерживается. Выберите изображение или видео.',
+        opacity,
+        blur,
+        dim
+      }
+    }
     return {
       enabled: true,
       kind,

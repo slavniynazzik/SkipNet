@@ -24,12 +24,18 @@ export const useZapretTestStore = create<ZapretTestStore>((set) => ({
 
 let listener: ((event: unknown, payload: StrategyTestProgress) => void) | null = null
 let lastToastedRanAt: number | null = null
+// Set as soon as a live progress event arrives. The hydration request below is
+// fired at the same time but resolves later, and must not overwrite fresher
+// state with its earlier snapshot.
+let progressSeen = false
 
 export const attachZapretTestStore = (): (() => void) => {
   // Hard reset duplicate listeners under HMR / StrictMode.
   window.electron.ipcRenderer.removeAllListeners('zapret:testProgress')
+  progressSeen = false
 
   listener = (_e, p) => {
+    progressSeen = true
     const isRunning = p.phase === 'starting' || p.phase === 'testing'
     useZapretTestStore.getState().set({
       progress: p,
@@ -70,6 +76,7 @@ export const attachZapretTestStore = (): (() => void) => {
     zapretGetStrategyTestResults().catch(() => null),
     zapretIsStrategyTestRunning().catch(() => false)
   ]).then(([report, running]) => {
+    if (progressSeen) return
     useZapretTestStore.getState().set({
       report: report ?? null,
       isRunning: running,
