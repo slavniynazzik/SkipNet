@@ -14,6 +14,7 @@ interface AppConfig {
   // ---- Appearance & locale
   appTheme: AppTheme
   customTheme?: string
+  wallpaper?: WallpaperConfig
   disableTray?: boolean
   hideTaskbarIcon?: boolean
   autoLaunch?: boolean
@@ -47,6 +48,22 @@ interface AppConfig {
   // ---- Feature-specific sub-configs
   tgws?: TgwsConfig
   zapret?: ZapretConfig
+}
+
+interface WallpaperConfig {
+  enabled: boolean
+  /** Where the wallpaper comes from. */
+  source: 'image' | 'video' | 'workshop'
+  /** Absolute path for the `image` / `video` sources. */
+  path?: string
+  /** Wallpaper Engine Steam Workshop item id (`source: 'workshop'`). */
+  workshopId?: string
+  /** Wallpaper opacity in percent (10–100). */
+  opacity?: number
+  /** Gaussian blur in pixels (0–32). */
+  blur?: number
+  /** Dark overlay in percent (0–90) for readability. */
+  dim?: number
 }
 
 interface TgwsConfig {

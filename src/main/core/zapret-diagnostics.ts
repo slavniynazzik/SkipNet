@@ -133,14 +133,29 @@ const WINDIVERT_NAMES = ['WinDivert', 'WinDivert14']
 function listRunningServices(): string[] {
   const out = scList()
   const names: string[] = []
-  for (const line of out.split(/\r?\n/)) {
-    // The service-name line is the only one that starts at column 0:
-    //   SERVICE_NAME: BFE        (English)
-    //   ИМЯ_СЛУЖБЫ: BFE          (Russian)
-    // Field lines are indented, so anchoring on `^[^\s:]` keeps them out.
-    const m = /^([^\s:][^:]*):\s*(\S+)\s*$/.exec(line)
-    if (m) names.push(m[2])
+
+  // `sc query` prints one block per service, separated by blank lines. The
+  // first line of a block is the service name, the second is the localised
+  // display name — both start at column 0, so matching every `label: value`
+  // line would treat display names as service names and produce false
+  // conflicts (e.g. a display name that merely contains "Killer").
+  const flush = (block: string[]): void => {
+    const first = block.find((line) => line.trim() !== '')
+    if (!first) return
+    const match = /^([^\s:][^:]*):\s*(\S+)\s*$/.exec(first)
+    if (match) names.push(match[2])
   }
+
+  let block: string[] = []
+  for (const line of out.split(/\r?\n/)) {
+    if (line.trim() === '') {
+      flush(block)
+      block = []
+    } else {
+      block.push(line)
+    }
+  }
+  flush(block)
   return names
 }
 
@@ -442,10 +457,15 @@ export function removeConflictingBypasses(): DiagnosticsFixResult {
     run('sc.exe', ['delete', name], 6000)
     removed.push(name)
   }
-  for (const name of WINDIVERT_NAMES) {
-    if (!serviceExists(name)) continue
-    run('sc.exe', ['stop', name], 6000)
-    run('sc.exe', ['delete', name], 6000)
+  // Only clean up WinDivert when our own bypass is not using it. Deleting the
+  // service while winws.exe runs drops the driver the active session depends
+  // on and silently breaks bypassing until Zapret is restarted.
+  if (!isWinwsRunning()) {
+    for (const name of WINDIVERT_NAMES) {
+      if (!serviceExists(name)) continue
+      run('sc.exe', ['stop', name], 6000)
+      run('sc.exe', ['delete', name], 6000)
+    }
   }
   return removed.length
     ? { ok: true, message: `Удалены службы: ${removed.join(', ')}.` }

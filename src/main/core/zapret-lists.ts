@@ -294,13 +294,22 @@ export async function updateZapretLists(
 
   const updated: ZapretListsUpdateResult['updated'] = []
   let totalEntries = 0
+  // Updating lists must not silently change the user's IPSet mode. When the
+  // active mode is `none`/`any`, keep the downloaded ranges in `.backup` (so
+  // switching back to "По списку" restores fresh data) and leave the active
+  // placeholder/empty file untouched.
+  const activeIpSetMode = getIpSetModeStatus().mode
 
   for (const result of results) {
     if (result.status !== 'fulfilled') continue
     const { spec, content, entries } = result.value
     const target = path.join(dir, spec.file)
-    ensureBackup(target)
-    writeAtomic(target, content)
+    if (spec.id === IPSET_SPEC.id && activeIpSetMode !== 'loaded') {
+      writeAtomic(backupPath(target), content)
+    } else {
+      ensureBackup(target)
+      writeAtomic(target, content)
+    }
     updated.push({
       id: spec.id,
       name: spec.name,
@@ -342,14 +351,24 @@ function ipsetFile(): string {
 
 export function getIpSetModeStatus(): IpSetModeStatus {
   const file = ipsetFile()
+  const fileExists = existsSync(file)
   const lines = readText(file)
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean)
   let mode: IpSetMode
-  if (lines.length === 0) mode = 'any'
-  else if (lines.includes(IPSET_PLACEHOLDER)) mode = 'none'
-  else mode = 'loaded'
+  if (!fileExists) {
+    // A missing list is not "all IPs" — it means no mode has been written
+    // yet (fresh bundle). Treat it as the normal "loaded" mode so a list
+    // update recreates the file instead of silently disabling IP rules.
+    mode = 'loaded'
+  } else if (lines.length === 0) {
+    mode = 'any'
+  } else if (lines.includes(IPSET_PLACEHOLDER)) {
+    mode = 'none'
+  } else {
+    mode = 'loaded'
+  }
   const backup = backupPath(file)
   return {
     mode,
@@ -364,7 +383,7 @@ export async function setIpSetMode(mode: IpSetMode): Promise<IpSetModeStatus> {
   ensureBundle()
   const file = ipsetFile()
   const current = getIpSetModeStatus()
-  if (current.mode === mode) return current
+  if (current.mode === mode && (mode !== 'loaded' || existsSync(file))) return current
 
   const backup = backupPath(file)
 
@@ -376,11 +395,16 @@ export async function setIpSetMode(mode: IpSetMode): Promise<IpSetModeStatus> {
     }
     copyFileSync(backup, file)
   } else {
-    // Keep the current ranges recoverable before replacing the file. Only a
-    // loaded list is worth saving — backing up the placeholder/empty file
-    // would later make `loaded` restore nothing useful.
-    if ((!existsSync(backup) || safeSize(backup) === 0) && current.mode === 'loaded') {
-      ensureBackup(file)
+    // Keep the ranges visible before replacing the file so `loaded` restores
+    // exactly what the user had. Always refresh the backup when the current
+    // mode really is `loaded`; otherwise an old copy from a previous list
+    // update would make "По списку" restore stale data.
+    if (current.mode === 'loaded') {
+      try {
+        copyFileSync(file, backup)
+      } catch {
+        ensureBackup(file)
+      }
     }
     writeAtomic(file, mode === 'none' ? `${IPSET_PLACEHOLDER}\r\n` : '')
   }

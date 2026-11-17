@@ -50,6 +50,12 @@ import {
 import { getFakesStatus, replaceActiveFake, type FakeKind } from '../core/zapret-fakes'
 import { checkZapretHosts, prepareHostsUpdate, applyHostsUpdate } from '../core/zapret-hosts'
 import {
+  listWorkshopWallpapers,
+  openWorkshopItem,
+  pickWallpaperFile,
+  resolveWallpaper
+} from '../core/wallpaper'
+import {
   runZapretDiagnostics,
   fixTcpTimestamps,
   fixWindivertConflict,
@@ -315,6 +321,15 @@ export function registerIpcMainHandlers(): void {
   }))
   ipcMain.handle('zapret:runTests', h(() => runZapretTests()))
   ipcMain.handle('zapret:clearDiscordCache', h(() => clearDiscordCache()))
+
+  // ---- Wallpaper ----------------------------------------------------------
+  ipcMain.handle('wallpaper:listWorkshop', h(() => listWorkshopWallpapers(true)))
+  ipcMain.handle('wallpaper:pick', h(() => pickWallpaperFile()))
+  ipcMain.handle('wallpaper:resolve', h(async () => {
+    const cfg = await getAppConfig()
+    return resolveWallpaper(cfg.wallpaper)
+  }))
+  ipcMain.handle('wallpaper:openWorkshop', h((id) => openWorkshopItem(String(id ?? ''))))
 
   // ---- SkipNet self-update ----------------------------------------------
   ipcMain.handle('app:checkUpdate', h((force) => checkAppUpdate(Boolean(force))))

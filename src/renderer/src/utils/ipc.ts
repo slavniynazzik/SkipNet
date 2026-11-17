@@ -334,6 +334,38 @@ export const appInstallUpdate = (
 export const appDismissUpdate = (tag: string): Promise<void> =>
   invoke('app:dismissUpdate', tag)
 
+// ---- Wallpaper -------------------------------------------------------------
+export interface WorkshopWallpaper {
+  id: string
+  title: string
+  type: string
+  playable: boolean
+  mediaPath: string
+  previewPath?: string
+  dir: string
+}
+export interface WallpaperState {
+  enabled: boolean
+  kind: 'none' | 'image' | 'video'
+  url?: string
+  previewUrl?: string
+  title?: string
+  note?: string
+  opacity: number
+  blur: number
+  dim: number
+}
+export interface WallpaperPickResult {
+  path?: string
+  name?: string
+}
+export const wallpaperListWorkshop = (): Promise<WorkshopWallpaper[]> =>
+  invoke('wallpaper:listWorkshop')
+export const wallpaperPick = (): Promise<WallpaperPickResult> => invoke('wallpaper:pick')
+export const wallpaperResolve = (): Promise<WallpaperState> => invoke('wallpaper:resolve')
+export const wallpaperOpenWorkshop = (id: string): Promise<void> =>
+  invoke('wallpaper:openWorkshop', id)
+
 // ---- App control ------------------------------------------------------------
 export const appQuit = (): Promise<void> => invoke('app:quit')
 export const appRelaunch = (): Promise<void> => invoke('app:relaunch')

@@ -19,6 +19,13 @@ export const CONFIG_VERSION = 4
 export const defaultConfig: AppConfig = {
   configVersion: CONFIG_VERSION,
   appTheme: 'dark',
+  wallpaper: {
+    enabled: false,
+    source: 'image',
+    opacity: 100,
+    blur: 0,
+    dim: 0
+  },
   disableTray: false,
   // When ON the main window is excluded from the Windows taskbar entirely
   // AND clicking X hides the window into the tray. OFF by default — normal

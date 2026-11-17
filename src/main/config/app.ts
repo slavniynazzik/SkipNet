@@ -61,9 +61,9 @@ async function readConfigFromDisk(): Promise<AppConfig | null> {
 
 export async function getAppConfig(force = false): Promise<AppConfig> {
   if (force || !appConfig) {
-    appConfig = (await readConfigFromDisk()) ?? defaultConfig
+    appConfig = (await readConfigFromDisk()) ?? structuredClone(defaultConfig)
   }
-  if (!appConfig || typeof appConfig !== 'object') appConfig = defaultConfig
+  if (!appConfig || typeof appConfig !== 'object') appConfig = structuredClone(defaultConfig)
 
   const persistedVersion: number = typeof appConfig.configVersion === 'number'
     ? appConfig.configVersion
@@ -75,7 +75,12 @@ export async function getAppConfig(force = false): Promise<AppConfig> {
 
   // Backfill any missing fields (e.g. tgws/zapret sections from older configs)
   // by merging persisted values *over* the default template.
-  appConfig = deepMerge(defaultConfig, appConfig) as AppConfig
+  //
+  // IMPORTANT: merge into a clone. `deepMerge` mutates its target, so using
+  // `defaultConfig` directly would permanently bake the user's saved values
+  // into the shared template — a later corrupt/missing config would then
+  // "restore" the previous user's settings instead of factory defaults.
+  appConfig = deepMerge(structuredClone(defaultConfig), appConfig) as AppConfig
 
   if ((appConfig.appTheme as string) !== 'light' && (appConfig.appTheme as string) !== 'dark') {
     appConfig = { ...appConfig, appTheme: 'dark' }
@@ -185,7 +190,7 @@ export async function patchAppConfig(patch: Partial<AppConfig>): Promise<void> {
     const prevDisableTray = appConfig?.disableTray
     const prevHideTaskbarIcon = appConfig?.hideTaskbarIcon
 
-    appConfig = deepMerge(appConfig ?? defaultConfig, patch)
+    appConfig = deepMerge(appConfig ?? structuredClone(defaultConfig), patch)
     await safeWriteConfig(stringifyYaml(appConfig))
 
     if (patch.autoLaunch !== undefined && patch.autoLaunch !== prevAutoLaunch) {
@@ -236,9 +241,9 @@ export function getAppConfigSync(): AppConfig {
   try {
     const raw = readFileSync(appConfigPath(), 'utf-8')
     const data = parseYaml<AppConfig>(raw)
-    if (data && typeof data === 'object') return deepMerge(defaultConfig, data) as AppConfig
-    return defaultConfig
+    if (data && typeof data === 'object') return deepMerge(structuredClone(defaultConfig), data) as AppConfig
+    return structuredClone(defaultConfig)
   } catch {
-    return defaultConfig
+    return structuredClone(defaultConfig)
   }
 }

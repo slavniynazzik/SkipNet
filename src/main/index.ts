@@ -15,7 +15,11 @@ import { appLog } from './utils/app-logger'
 import { enableAutoRun, disableAutoRun } from './sys/autoRun'
 import { isRunningAsAdmin } from './utils/elevation'
 import { consumeResumeZapretAfterUpdate } from './core/app-updater'
+import { initWallpaperProtocol, registerWallpaperScheme } from './core/wallpaper'
 import { migrateLegacyData } from './utils/dirs'
+
+// The wallpaper media protocol must be declared before Electron is ready.
+registerWallpaperScheme()
 
 // Lock the userData / cache / log folder names.
 app.setName(is.dev ? 'skipnet-dev' : 'skipnet')
@@ -86,7 +90,19 @@ app.whenReady().then(async () => {
   })
 
   registerIpcMainHandlers()
+  initWallpaperProtocol()
   const appConfig = await getAppConfig()
+
+  // Keep `utils/check_updates.enabled` in sync with the saved preference.
+  // Bundle updates re-extract the upstream file (which ships enabled), so
+  // without this a user who disabled the check would silently get it back
+  // after every Zapret update.
+  try {
+    const { setAutoUpdateCheck } = await import('./core/zapret-diagnostics')
+    setAutoUpdateCheck(appConfig.zapret?.checkUpdates !== false)
+  } catch (e) {
+    appLog('warn', `Не удалось синхронизировать check_updates.enabled: ${e}`)
+  }
 
   if (appConfig.tgws?.autoStart) {
     appLog('info', 'Автозапуск Telegram WS — старт')

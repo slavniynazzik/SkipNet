@@ -3,11 +3,11 @@ import { spawn, spawnSync } from 'child_process'
 import { createHash } from 'crypto'
 import path from 'path'
 import { app } from 'electron'
-import { dataDir } from '../utils/dirs'
+import { dataDir, isPortable } from '../utils/dirs'
 import { getAppConfig, patchAppConfig } from '../config'
 import { loadUpdateCache, saveUpdateCache } from '../utils/update-cache'
 import { fetchGithub } from '../utils/github'
-import { getZapretStatus, stopZapret } from './zapret'
+import { getZapretStatus, startZapret, stopZapret } from './zapret'
 import { stopTgws } from './tgws'
 
 const DEFAULT_REPO = 'slavniynazzik/SkipNet'
@@ -292,6 +292,16 @@ export async function installAppUpdate(
   if (process.platform !== 'win32') {
     throw new Error('Авто-обновление поддерживается только на Windows')
   }
+  if (isPortable()) {
+    // The portable build has no NSIS uninstaller/registry entry. Running the
+    // installer would create a second, independent installation in Program
+    // Files while the portable copy stays stale. Point the user at the
+    // portable archive instead.
+    throw new Error(
+      'Портативную версию нельзя обновить автоматически. Скачайте новый ' +
+        'SkipNet_x64-portable.7z со страницы релиза и распакуйте поверх текущей папки.'
+    )
+  }
 
   let buf: Buffer
   try {
@@ -399,6 +409,11 @@ export async function installAppUpdate(
       unlinkSync(installerPath)
     } catch {
       /* noop — temp file, Windows will clean it eventually */
+    }
+    // The installer never started, so the app will keep running. Drop the
+    // one-shot "restore Zapret" flag and turn Zapret back on if we stopped it.
+    if (consumeResumeZapretAfterUpdate()) {
+      startZapret().catch(() => void 0)
     }
     throw new Error(
       `Не удалось запустить установщик: ${e instanceof Error ? e.message : String(e)}`

@@ -6,17 +6,28 @@ import {
   appDismissUpdate,
   type AppUpdateInfo
 } from '@renderer/utils/ipc'
+import { useAppConfig } from '@renderer/hooks/use-app-config'
 import { Button } from '@renderer/components/ui/button'
 
 const POLL_INTERVAL_MS = 60 * 60 * 1000 // 1 h
 
 export default function AppUpdateOverlay(): React.ReactElement | null {
+  const { appConfig } = useAppConfig()
+  const configReady = !!appConfig
+  // `autoCheckUpdate` was previously dead config: the overlay always polled
+  // GitHub. Respect the toggle and wait for the config to load, so a user who
+  // disabled auto-checks never sees a flash of the overlay on startup.
+  const autoCheck = appConfig?.autoCheckUpdate !== false
   const [info, setInfo] = useState<AppUpdateInfo | null>(null)
   const [installing, setInstalling] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [closing, setClosing] = useState(false)
 
   useEffect(() => {
+    if (!configReady || !autoCheck) {
+      setInfo(null)
+      return
+    }
     let cancelled = false
     const check = async (force = false): Promise<void> => {
       try {
@@ -33,7 +44,24 @@ export default function AppUpdateOverlay(): React.ReactElement | null {
       cancelled = true
       window.clearInterval(id)
     }
+  }, [configReady, autoCheck])
+
+  useEffect(() => {
+    // Manual check from Settings can surface an update even when automatic
+    // checks are disabled: the page dispatches the freshly fetched info.
+    const handler = (event: Event): void => {
+      const detail = (event as CustomEvent<AppUpdateInfo>).detail
+      if (detail) setInfo(detail)
+    }
+    window.addEventListener('skipnet:app-update-available', handler)
+    return () => window.removeEventListener('skipnet:app-update-available', handler)
   }, [])
+
+  useEffect(() => {
+    // Re-show the overlay when a *newer* release arrives after the user
+    // dismissed the previous one in this session.
+    setClosing(false)
+  }, [info?.tag])
 
   const visible =
     !!info &&

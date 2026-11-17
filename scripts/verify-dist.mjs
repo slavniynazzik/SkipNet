@@ -103,6 +103,17 @@ if (existsSync(zapret)) {
   const bats = readdirSync(zapret).filter((name) => /^general.*\.bat$/i.test(name))
   check(bats.length === 22, `expected 22 zapret strategies, found ${bats.length}`)
   check(existsSync(path.join(zapret, 'service.bat')), 'missing zapret service.bat')
+  // The maintenance card launches the bundled PowerShell test suite and uses
+  // `utils/check_updates.enabled`. If the folder is filtered out again, both
+  // actions fail at runtime with ENOENT / "файл не найден".
+  check(
+    existsSync(path.join(zapret, 'utils', 'test zapret.ps1')),
+    'missing zapret/utils/test zapret.ps1'
+  )
+  check(
+    existsSync(path.join(zapret, 'utils', 'check_updates.enabled')),
+    'missing zapret/utils/check_updates.enabled'
+  )
 }
 
 for (const asset of ['icon.ico', 'icon.png', 'icon_on.ico', 'icon_on.png', 'icon_off.ico', 'icon_off.png']) {

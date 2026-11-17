@@ -1,11 +1,11 @@
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { useLocation, useRoutes } from 'react-router-dom'
 import { toast } from 'sonner'
 import { useTheme } from 'next-themes'
 import './i18n'
 import routes from '@renderer/routes'
 import { useAppConfig } from '@renderer/hooks/use-app-config'
-import { applyTheme, setNativeTheme } from '@renderer/utils/ipc'
+import { applyTheme, setNativeTheme, wallpaperResolve, type WallpaperState } from '@renderer/utils/ipc'
 import { SidebarProvider } from '@renderer/components/ui/sidebar'
 import AppSidebar from '@renderer/components/app-sidebar'
 import AppUpdateOverlay from '@renderer/components/app-update-overlay'
@@ -26,6 +26,23 @@ const App: React.FC = () => {
   const location = useLocation()
   const isHome = location.pathname === '/' || location.pathname.includes('/home')
   const mapBg = resolvedTheme === 'dark' ? mapDark : mapLight
+  const [wallpaper, setWallpaper] = useState<WallpaperState | null>(null)
+  const wallpaperKey = JSON.stringify(appConfig?.wallpaper ?? null)
+  const wallpaperActive = !!wallpaper?.enabled && wallpaper.kind !== 'none' && !!wallpaper.url
+
+  useEffect(() => {
+    let cancelled = false
+    wallpaperResolve()
+      .then((state) => {
+        if (!cancelled) setWallpaper(state)
+      })
+      .catch(() => {
+        if (!cancelled) setWallpaper(null)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [wallpaperKey])
 
   useEffect(() => {
     const d1 = attachLogsStore()
@@ -98,13 +115,53 @@ const App: React.FC = () => {
       className="relative w-full h-screen overflow-hidden"
       style={{ backgroundColor: resolvedTheme === 'dark' ? '#000000' : '#E5E5E5' }}
     >
-      <img
-        src={mapBg}
-        alt=""
-        className={`pointer-events-none absolute inset-0 opacity-65 w-full h-full object-cover z-0 transition-[filter] duration-500 ${
-          isHome ? '' : 'blur-3xl'
-        }`}
-      />
+      {!wallpaperActive && (
+        <img
+          src={mapBg}
+          alt=""
+          className={`pointer-events-none absolute inset-0 opacity-65 w-full h-full object-cover z-0 transition-[filter] duration-500 ${
+            isHome ? '' : 'blur-3xl'
+          }`}
+        />
+      )}
+      {wallpaperActive && wallpaper && (
+        <div
+          key={wallpaper.url}
+          className="pointer-events-none absolute inset-0 z-0 overflow-hidden"
+          style={{ opacity: Math.min(100, Math.max(10, wallpaper.opacity)) / 100 }}
+        >
+          {wallpaper.kind === 'video' ? (
+            <video
+              src={wallpaper.url}
+              autoPlay
+              loop
+              muted
+              playsInline
+              className="h-full w-full object-cover"
+              style={{
+                filter: wallpaper.blur ? `blur(${wallpaper.blur}px)` : undefined,
+                transform: wallpaper.blur ? 'scale(1.06)' : undefined
+              }}
+            />
+          ) : (
+            <img
+              src={wallpaper.url}
+              alt=""
+              className="h-full w-full object-cover"
+              style={{
+                filter: wallpaper.blur ? `blur(${wallpaper.blur}px)` : undefined,
+                transform: wallpaper.blur ? 'scale(1.06)' : undefined
+              }}
+            />
+          )}
+          {wallpaper.dim > 0 && (
+            <div
+              className="absolute inset-0 bg-black"
+              style={{ opacity: Math.min(90, Math.max(0, wallpaper.dim)) / 100 }}
+            />
+          )}
+        </div>
+      )}
       {platform === 'darwin' && (
         <div className="fixed top-0.5 -left-1 h-14.25 flex items-center pl-3 z-100 app-drag">
           <WindowControls />

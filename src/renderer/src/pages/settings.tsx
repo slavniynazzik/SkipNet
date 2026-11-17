@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { toast } from 'sonner'
 import { Loader2, RefreshCw } from 'lucide-react'
 import { useAppConfig } from '@renderer/hooks/use-app-config'
@@ -6,8 +6,15 @@ import { Card, CardContent, CardHeader, CardTitle } from '@renderer/components/u
 import { Label } from '@renderer/components/ui/label'
 import { Switch } from '@renderer/components/ui/switch'
 import { Button } from '@renderer/components/ui/button'
-import { appRelaunch, tgwsCheckUpdate, zapretCheckUpdate } from '@renderer/utils/ipc'
+import {
+  appCheckUpdate,
+  appRelaunch,
+  getAppVersion,
+  tgwsCheckUpdate,
+  zapretCheckUpdate
+} from '@renderer/utils/ipc'
 import BasePage from '@renderer/components/base/base-page'
+import WallpaperCard from '@renderer/components/wallpaper-card'
 import {
   BUNDLED_TGWS_VERSION,
   BUNDLED_ZAPRET_VERSION,
@@ -23,14 +30,20 @@ const themeLabels: Record<AppTheme, string> = {
 const Settings: React.FC = () => {
   const { appConfig, patchAppConfig } = useAppConfig()
   const [checkingUpdates, setCheckingUpdates] = useState(false)
+  const [appVersion, setAppVersion] = useState<string | null>(null)
+
+  useEffect(() => {
+    getAppVersion().then(setAppVersion).catch(() => setAppVersion(null))
+  }, [])
 
   const checkUpdates = async (): Promise<void> => {
     if (checkingUpdates) return
     setCheckingUpdates(true)
     try {
-      const [tgws, zapret] = await Promise.allSettled([
+      const [tgws, zapret, app] = await Promise.allSettled([
         tgwsCheckUpdate(true),
-        zapretCheckUpdate(true)
+        zapretCheckUpdate(true),
+        appCheckUpdate(true)
       ])
       const ok: string[] = []
       const failed: string[] = []
@@ -54,6 +67,22 @@ const Settings: React.FC = () => {
       } else {
         failed.push(
           `Zapret: ${zapret.reason instanceof Error ? zapret.reason.message : String(zapret.reason)}`
+        )
+      }
+      if (app.status === 'fulfilled') {
+        ok.push(
+          app.value.hasUpdate
+            ? `SkipNet: доступно v${app.value.latest}`
+            : `SkipNet: v${app.value.installed} — актуально`
+        )
+        if (app.value.hasUpdate) {
+          window.dispatchEvent(
+            new CustomEvent('skipnet:app-update-available', { detail: app.value })
+          )
+        }
+      } else {
+        failed.push(
+          `SkipNet: ${app.reason instanceof Error ? app.reason.message : String(app.reason)}`
         )
       }
       if (failed.length > 0) {
@@ -94,6 +123,8 @@ const Settings: React.FC = () => {
           </div>
         </CardContent>
       </Card>
+
+      <WallpaperCard />
 
       <Card>
         <CardHeader>
@@ -174,6 +205,26 @@ const Settings: React.FC = () => {
           <CardTitle>Обновления</CardTitle>
         </CardHeader>
         <CardContent className="space-y-3">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex flex-col">
+              <Label className="text-sm">Проверять обновления автоматически</Label>
+              <span className="text-xs text-muted-foreground">
+                Показывает окно обновления SkipNet, когда выходит новая версия.
+              </span>
+            </div>
+            <Switch
+              checked={appConfig?.autoCheckUpdate ?? true}
+              onCheckedChange={(v) => patchAppConfig({ autoCheckUpdate: v })}
+            />
+          </div>
+          <div className="flex items-center justify-between">
+            <div className="flex flex-col">
+              <Label className="text-sm">SkipNet</Label>
+              <span className="text-xs text-muted-foreground">
+                Установлено: v{appVersion ?? '…'}
+              </span>
+            </div>
+          </div>
           <div className="flex items-center justify-between">
             <div className="flex flex-col">
               <Label className="text-sm">Telegram WS (TgWsProxy)</Label>
