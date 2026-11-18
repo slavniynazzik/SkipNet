@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, writeFileSync, unlinkSync } from 'fs'
 import { spawn, spawnSync } from 'child_process'
-import { createHash } from 'crypto'
+import { createHash, randomUUID } from 'crypto'
 import path from 'path'
 import { app } from 'electron'
 import { dataDir, isPortable } from '../utils/dirs'
@@ -340,8 +340,8 @@ export async function installAppUpdate(
   // colliding while leaving older copies for Disk Cleanup to remove.
   const dir = app.getPath('temp')
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
-  const installerPath = path.join(dir, `SkipNet-update-${Date.now()}.exe`)
-  writeFileSync(installerPath, buf)
+  const installerPath = path.join(dir, `SkipNet-update-${randomUUID()}.exe`)
+  writeFileSync(installerPath, buf, { flag: 'wx' })
 
   // Tell the OLD installer's customUnInstall macro that this run is an
   // in-place upgrade and the user-data wipe MUST be skipped — otherwise
@@ -432,7 +432,7 @@ export async function installAppUpdate(
     try {
       const exePath = process.execPath
       const exeDir = path.dirname(exePath)
-      const ts = Date.now()
+      const ts = randomUUID()
       const logPath = path.join(dir, `SkipNet-relaunch-${ts}.log`)
       const watcherScript = [
         "$ErrorActionPreference = 'SilentlyContinue'",
@@ -493,7 +493,10 @@ export async function installAppUpdate(
       // Prepend BOM so PowerShell reads the script as UTF-8 even on
       // legacy systems where the OEM code page would otherwise mangle
       // non-ASCII characters in install paths.
-      writeFileSync(watcherPath, '\ufeff' + watcherScript, 'utf8')
+      writeFileSync(watcherPath, '\ufeff' + watcherScript, {
+        encoding: 'utf8',
+        flag: 'wx'
+      })
       const watcher = spawn(
         'powershell.exe',
         [

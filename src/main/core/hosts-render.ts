@@ -25,6 +25,16 @@ const LEGACY_ORPHAN_LINES = new Set([
   '# --- telegram proxy (auto-managed by zapret 2 gui) ---'
 ])
 
+function normalizeHostsText(content: string): string {
+  // A UTF-8 BOM read as latin1 is `ï»¿`; either form must not hide the first
+  // marker from the parsers.
+  return content.replace(/^\uFEFF/, '').replace(/^\u00ef\u00bb\u00bf/, '')
+}
+
+function splitHostsLines(content: string): string[] {
+  return normalizeHostsText(content).split(/\r\n|\r|\n/)
+}
+
 export interface ParsedHostsPair {
   ip: string
   hostname: string
@@ -38,8 +48,10 @@ export interface RenderedHostsBlock {
 }
 
 function parsePair(line: string): { ip: string; hostnames: string[] } | null {
-  const trimmed = line.trim()
-  if (!trimmed || trimmed.startsWith('#')) return null
+  // Hosts files commonly carry trailing comments on a mapping line
+  // (`127.0.0.1 localhost # loopback`). Ignore everything after `#`.
+  const trimmed = line.split('#', 1)[0].trim()
+  if (!trimmed) return null
   const parts = trimmed.split(/\s+/)
   if (parts.length < 2) return null
   const ip = parts[0]
@@ -132,14 +144,59 @@ function isAdobeEntry(line: string, adobeHosts: Set<string>): boolean {
  * Remove every block SkipNet owns or supersedes, but leave unrelated lines
  * (other apps, localhost entries, the legacy SkipNet Telegram block) intact.
  */
+/**
+ * A half-written managed block must never be treated as "everything after the
+ * start marker belongs to SkipNet": that would delete unrelated host entries.
+ */
+export function assertBalancedBlocks(content: string): void {
+  let open: string | null = null
+
+  for (const line of splitHostsLines(content)) {
+    const trimmed = line.trim()
+    let start: string | null = null
+    let end: string | null = null
+
+    if (trimmed === EDITOR_BLOCK_START) start = 'SkipNet hosts'
+    else if (trimmed === EDITOR_BLOCK_END) end = 'SkipNet hosts'
+    else if (ZAPRETGUI_START_RE.test(trimmed)) start = 'ZapretGUI'
+    else if (ZAPRETGUI_END_RE.test(trimmed)) end = 'ZapretGUI'
+    else if (trimmed === LEGACY_SKIPNET_START) start = 'старый SkipNet'
+    else if (trimmed === LEGACY_SKIPNET_END) end = 'старый SkipNet'
+    else if (trimmed === ADOBE_BLOCK_START) start = 'Adobe'
+    else if (trimmed === ADOBE_BLOCK_END) end = 'Adobe'
+
+    if (start) {
+      if (open) throw new Error(`Повреждённые блоки в hosts: «${open}» не закрыт.`)
+      open = start
+      continue
+    }
+    if (end) {
+      if (open !== end) {
+        throw new Error(
+          `Повреждённые блоки в hosts: закрывающий маркер «${end}» без начала.`
+        )
+      }
+      open = null
+    }
+  }
+
+  if (open) {
+    throw new Error(
+      `Повреждённые блоки в hosts: «${open}» не закрыт. ` +
+        'Откройте файл вручную и восстановите закрывающий маркер.'
+    )
+  }
+}
+
 export function stripManagedBlocks(content: string, adobeHosts: Set<string>): string {
+  assertBalancedBlocks(content)
   const kept: string[] = []
   let inZapretGui = false
   let inLegacySkipNet = false
   let inEditor = false
   let inAdobeEditor = false
 
-  for (const line of content.split(/\r?\n/)) {
+  for (const line of splitHostsLines(content)) {
     const trimmed = line.trim()
 
     if (ZAPRETGUI_START_RE.test(trimmed)) {
@@ -207,6 +264,51 @@ export function buildHostsContent(
   return `${parts.join('\r\n\r\n')}\r\n`
 }
 
+const VALID_HOST_RE =
+  /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:\.(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?))*$/i
+
+/**
+ * Validate a hosts file before restoring it from a backup. Rejects arbitrary
+ * lines (commands, binary data) while allowing comments and normal mappings.
+ */
+export function validateHostsFileContent(content: string): void {
+  // The file is read as latin1, so a UTF-8 BOM appears as the three characters
+  // `ï»¿`. Drop it before validating the first real line.
+  const normalized = content.replace(/^\uFEFF/, '').replace(/^\u00ef\u00bb\u00bf/, '')
+  assertBalancedBlocks(normalized)
+  for (const line of splitHostsLines(normalized)) {
+    const mapping = line.split('#', 1)[0].trim()
+    if (!mapping) continue
+    const parts = mapping.split(/\s+/)
+    if (parts.length < 2 || !isIP(parts[0])) {
+      throw new Error(`Повреждённая строка в бэкапе hosts: ${mapping.slice(0, 120)}`)
+    }
+    for (const hostname of parts.slice(1)) {
+      if (!VALID_HOST_RE.test(hostname)) {
+        throw new Error(`Повреждённое имя хоста в бэкапе: ${hostname.slice(0, 120)}`)
+      }
+    }
+  }
+}
+
+/** Extract a managed block including its markers, or '' when absent. */
+export function extractBlock(content: string, start: string, end: string): string {
+  const lines: string[] = []
+  let inBlock = false
+  for (const line of splitHostsLines(content)) {
+    const trimmed = line.trim()
+    if (!inBlock && trimmed === start) {
+      inBlock = true
+      lines.push(trimmed)
+      continue
+    }
+    if (!inBlock) continue
+    lines.push(trimmed)
+    if (trimmed === end) break
+  }
+  return lines.join('\n')
+}
+
 export function hashHostsContent(content: string): string {
   return createHash('sha256').update(Buffer.from(content, 'latin1')).digest('hex')
 }
@@ -214,7 +316,7 @@ export function hashHostsContent(content: string): string {
 export function countEditorBlockLines(content: string): number {
   let inBlock = false
   let count = 0
-  for (const line of content.split(/\r?\n/)) {
+  for (const line of splitHostsLines(content)) {
     const trimmed = line.trim()
     if (trimmed === EDITOR_BLOCK_START) {
       inBlock = true
@@ -236,7 +338,7 @@ export function detectLegacyBlocks(
   let zapretGui = false
   let skipNet = false
   let adobe = false
-  for (const line of content.split(/\r?\n/)) {
+  for (const line of splitHostsLines(content)) {
     const trimmed = line.trim()
     if (ZAPRETGUI_START_RE.test(trimmed)) zapretGui = true
     if (trimmed === LEGACY_SKIPNET_START) skipNet = true
@@ -249,7 +351,7 @@ export function detectLegacyBlocks(
 export function parseLegacyZapretGui(content: string): ParsedHostsPair[] {
   const pairs: ParsedHostsPair[] = []
   let inBlock = false
-  for (const line of content.split(/\r?\n/)) {
+  for (const line of splitHostsLines(content)) {
     const trimmed = line.trim()
     if (ZAPRETGUI_START_RE.test(trimmed)) {
       inBlock = true
@@ -267,7 +369,7 @@ export function parseLegacyZapretGui(content: string): ParsedHostsPair[] {
 export function parseLegacySkipNet(content: string): ParsedHostsPair[] {
   const pairs: ParsedHostsPair[] = []
   let inBlock = false
-  for (const line of content.split(/\r?\n/)) {
+  for (const line of splitHostsLines(content)) {
     const trimmed = line.trim()
     if (trimmed === LEGACY_SKIPNET_START) {
       inBlock = true
@@ -282,9 +384,27 @@ export function parseLegacySkipNet(content: string): ParsedHostsPair[] {
   return pairs
 }
 
+export function parseEditorBlock(content: string): ParsedHostsPair[] {
+  const pairs: ParsedHostsPair[] = []
+  let inBlock = false
+  for (const line of splitHostsLines(content)) {
+    const trimmed = line.trim()
+    if (trimmed === EDITOR_BLOCK_START) {
+      inBlock = true
+      continue
+    }
+    if (inBlock && trimmed === EDITOR_BLOCK_END) break
+    if (!inBlock) continue
+    const parsed = parsePair(line)
+    if (!parsed) continue
+    for (const hostname of parsed.hostnames) pairs.push({ ip: parsed.ip, hostname })
+  }
+  return pairs
+}
+
 export function parseAdobeEntries(content: string, adobeHosts: Set<string>): ParsedHostsPair[] {
   const pairs: ParsedHostsPair[] = []
-  for (const line of content.split(/\r?\n/)) {
+  for (const line of splitHostsLines(content)) {
     const parsed = parsePair(line)
     if (!parsed || parsed.ip !== '127.0.0.1') continue
     for (const hostname of parsed.hostnames) {
@@ -292,6 +412,19 @@ export function parseAdobeEntries(content: string, adobeHosts: Set<string>): Par
     }
   }
   return pairs
+}
+
+/** Count legacy pairs whose hostname does not exist in the catalog at all. */
+export function countLegacyUnknownHostnames(
+  catalog: HostsCatalog,
+  pairs: ParsedHostsPair[]
+): number {
+  const known = new Set<string>()
+  for (const service of catalog.services) {
+    for (const entry of service.entries ?? []) known.add(entry.hostname)
+    for (const domain of service.domains ?? []) known.add(domain.hostname)
+  }
+  return pairs.filter((pair) => !known.has(pair.hostname)).length
 }
 
 /**
@@ -304,17 +437,19 @@ export function importLegacySelection(
   pairs: ParsedHostsPair[],
   defaultProfile: string
 ): Record<string, HostsSelection> {
-  const hostsIndex = new Map<string, Array<{ serviceId: string; ips: Set<string> }>>()
+  const hostsIndex = new Map<string, Set<string>>()
   const dnsIndex = new Map<string, Array<{ serviceId: string; answers: Record<string, string[]> }>>()
+  const dnsServices = new Map<string, HostsService>()
 
   for (const service of catalog.services) {
     if (service.kind === 'hosts') {
       for (const entry of service.entries ?? []) {
-        const list = hostsIndex.get(entry.hostname) ?? []
-        list.push({ serviceId: service.id, ips: new Set(entry.ips.map((ip) => ip.toLowerCase())) })
-        hostsIndex.set(entry.hostname, list)
+        const serviceIds = hostsIndex.get(entry.hostname) ?? new Set<string>()
+        serviceIds.add(service.id)
+        hostsIndex.set(entry.hostname, serviceIds)
       }
     } else {
+      dnsServices.set(service.id, service)
       for (const domain of service.domains ?? []) {
         const list = dnsIndex.get(domain.hostname) ?? []
         list.push({ serviceId: service.id, answers: domain.answers })
@@ -324,16 +459,18 @@ export function importLegacySelection(
   }
 
   const hostsMatched = new Set<string>()
+  const dnsMatched = new Set<string>()
   const dnsCounts = new Map<string, Map<string, number>>()
 
   for (const pair of pairs) {
     const ip = pair.ip.toLowerCase()
     const hostname = pair.hostname.toLowerCase()
 
-    for (const candidate of hostsIndex.get(hostname) ?? []) {
-      if (candidate.ips.has(ip)) hostsMatched.add(candidate.serviceId)
-    }
+    // A known hostname maps the service even if its legacy IP differs from
+    // the current catalog: the renderer writes the catalog's own addresses.
+    for (const serviceId of hostsIndex.get(hostname) ?? []) hostsMatched.add(serviceId)
     for (const candidate of dnsIndex.get(hostname) ?? []) {
+      dnsMatched.add(candidate.serviceId)
       for (const [profileId, ips] of Object.entries(candidate.answers)) {
         if (!ips.some((value) => value.toLowerCase() === ip)) continue
         const perService = dnsCounts.get(candidate.serviceId) ?? new Map<string, number>()
@@ -345,13 +482,29 @@ export function importLegacySelection(
 
   const selection: Record<string, HostsSelection> = {}
   for (const serviceId of hostsMatched) selection[serviceId] = 'hosts'
-  for (const [serviceId, counts] of dnsCounts) {
-    let bestProfile = defaultProfile
-    let bestCount = -1
-    for (const [profileId, count] of counts) {
-      if (count > bestCount) {
-        bestCount = count
-        bestProfile = profileId
+
+  for (const serviceId of dnsMatched) {
+    const counts = dnsCounts.get(serviceId)
+    let bestProfile: string | undefined
+    if (counts) {
+      let bestCount = -1
+      for (const [profileId, count] of counts) {
+        if (count > bestCount) {
+          bestCount = count
+          bestProfile = profileId
+        }
+      }
+    }
+    if (!bestProfile) {
+      const service = dnsServices.get(serviceId)
+      if (service) {
+        bestProfile = [defaultProfile, ...catalog.dnsProfiles.map((profile) => profile.id)].find(
+          (profileId) =>
+            !!profileId &&
+            (service.domains ?? []).some(
+              (domain) => (domain.answers[profileId]?.length ?? 0) > 0
+            )
+        )
       }
     }
     if (bestProfile) selection[serviceId] = bestProfile

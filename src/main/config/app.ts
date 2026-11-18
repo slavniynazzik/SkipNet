@@ -3,7 +3,7 @@ import { appConfigPath } from '../utils/dirs'
 import { parseYaml, stringifyYaml } from '../utils/yaml'
 import { deepMerge } from '../utils/merge'
 import { defaultConfig, CONFIG_VERSION } from '../utils/template'
-import { randomBytes } from 'crypto'
+import { randomBytes, randomUUID } from 'crypto'
 import { readFileSync, existsSync } from 'fs'
 import { is } from '@electron-toolkit/utils'
 import { enableAutoRun, disableAutoRun } from '../sys/autoRun'
@@ -17,10 +17,12 @@ function isValidConfig(c: unknown): c is AppConfig {
 
 async function safeWriteConfig(content: string): Promise<void> {
   const configPath = appConfigPath()
-  const tmpPath = `${configPath}.tmp`
+  // Random + O_EXCL: a fixed `.tmp` name in userData could be pre-created as a
+  // hardlink to a privileged file and be overwritten by this elevated write.
+  const tmpPath = `${configPath}.${randomUUID()}.tmp`
   const backupPath = `${configPath}.backup`
   try {
-    await writeFile(tmpPath, content, 'utf-8')
+    await writeFile(tmpPath, content, { encoding: 'utf-8', flag: 'wx' })
     // Keep the last known-good copy before replacing the live file.
     if (existsSync(configPath)) {
       try {

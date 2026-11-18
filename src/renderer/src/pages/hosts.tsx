@@ -112,10 +112,13 @@ const Hosts: React.FC = () => {
   const status = overview?.status
   const profiles = catalog?.dnsProfiles ?? []
   const legacyPresent = !!status?.legacy.zapretGui
-  const controlsLocked = legacyPresent || busyAction !== null
+  const legacySkipNet = !!status?.legacy.skipNet
+  const uiBusy = busyAction !== null || busyService !== null
+  const controlsLocked = legacyPresent || legacySkipNet || uiBusy
 
   const accept = (result: HostsOperationResult, success?: string): void => {
     setOverview(result)
+    setError(null)
     toast.success(success ?? result.message, {
       description: result.warnings.length > 0 ? result.warnings.slice(0, 3).join(' · ') : undefined
     })
@@ -125,7 +128,7 @@ const Hosts: React.FC = () => {
     id: string,
     action: () => Promise<HostsOperationResult>
   ): Promise<void> => {
-    if (busyAction) return
+    if (busyAction || busyService) return
     setBusyAction(id)
     try {
       accept(await action())
@@ -163,7 +166,7 @@ const Hosts: React.FC = () => {
   }
 
   const flushDns = async (): Promise<void> => {
-    if (busyAction) return
+    if (busyAction || busyService) return
     setBusyAction('dns')
     try {
       const result = await hostsFlushDns()
@@ -189,7 +192,7 @@ const Hosts: React.FC = () => {
   }
 
   const updateCatalog = async (): Promise<void> => {
-    if (busyAction) return
+    if (busyAction || busyService) return
     setBusyAction('catalog')
     try {
       const result = await hostsUpdateCatalog()
@@ -209,7 +212,7 @@ const Hosts: React.FC = () => {
   const importLegacy = (): void => {
     if (
       !window.confirm(
-        'Импортировать сервисы из блока ZapretGUI и заменить его блоком SkipNet?\n\n' +
+        'Импортировать сервисы из старого блока SkipNet/ZapretGUI и заменить его блоком SkipNet?\n\n' +
           'Перед изменением будет создан бэкап файла hosts.'
       )
     ) {
@@ -261,7 +264,7 @@ const Hosts: React.FC = () => {
                   <span className="text-sm text-muted-foreground">сервисов включено в hosts</span>
                 </div>
                 <div className="mt-1 text-[11px] text-muted-foreground">
-                  строк в файле: {managedLines}
+                  строк SkipNet в файле: {managedLines}
                   {catalogVersion ? ` · каталог ${catalogVersion}` : ''}
                   {checkedAt ? ` · адреса проверены ${formatWhen(checkedAt)}` : ''}
                 </div>
@@ -275,7 +278,7 @@ const Hosts: React.FC = () => {
                   size="sm"
                   variant="outline"
                   onClick={() => { void flushDns() }}
-                  disabled={busyAction !== null}
+                  disabled={uiBusy}
                 >
                   {busyAction === 'dns'
                     ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -286,7 +289,7 @@ const Hosts: React.FC = () => {
                   size="sm"
                   variant="outline"
                   onClick={restoreBackup}
-                  disabled={busyAction !== null}
+                  disabled={uiBusy}
                 >
                   <RotateCcw className="h-3.5 w-3.5" />
                   Из бэкапа
@@ -302,6 +305,7 @@ const Hosts: React.FC = () => {
                   void runAction('dnsAll', () => hostsSetDnsForAll(event.target.value))
                 }}
                 disabled={!state || controlsLocked}
+                title="Профиль для всех включённых DNS-сервисов"
                 className={cn(
                   'h-8 rounded-md border border-stroke bg-card/60 px-2 text-xs',
                   'outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-stroke'
@@ -326,7 +330,7 @@ const Hosts: React.FC = () => {
                 size="sm"
                 variant="ghost"
                 onClick={() => { void updateCatalog() }}
-                disabled={busyAction !== null}
+                disabled={uiBusy}
               >
                 {busyAction === 'catalog'
                   ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -362,7 +366,7 @@ const Hosts: React.FC = () => {
               <Button
                 size="sm"
                 onClick={importLegacy}
-                disabled={busyAction !== null}
+                disabled={uiBusy}
               >
                 {busyAction === 'import' && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
                 Импортировать и заменить
@@ -387,8 +391,8 @@ const Hosts: React.FC = () => {
               <Button
                 size="sm"
                 variant="outline"
-                onClick={() => { void runAction('apply', hostsApply) }}
-                disabled={busyAction !== null}
+                onClick={importLegacy}
+                disabled={uiBusy}
               >
                 Перенести и применить
               </Button>
@@ -396,30 +400,35 @@ const Hosts: React.FC = () => {
           </Card>
         )}
 
-        {status?.externalChange && !legacyPresent && (
-          <Card className="border-sky-500/40 bg-sky-500/5">
-            <CardContent className="flex flex-wrap items-center justify-between gap-3 pt-4">
-              <div className="min-w-0">
-                <div className="flex items-center gap-2 text-sm font-medium">
-                  <Info className="h-4 w-4 text-sky-400" />
-                  Файл hosts изменён вне SkipNet
+        {(status?.externalChange || status?.needsReapply) &&
+          !legacyPresent &&
+          !status?.legacy.skipNet && (
+            <Card className="border-sky-500/40 bg-sky-500/5">
+              <CardContent className="flex flex-wrap items-center justify-between gap-3 pt-4">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2 text-sm font-medium">
+                    <Info className="h-4 w-4 text-sky-400" />
+                    {status.needsReapply && !status.externalChange
+                      ? 'Каталог обновлён — примените новые адреса'
+                      : 'Файл hosts изменён вне SkipNet'}
+                  </div>
+                  <div className="mt-0.5 text-[11px] text-muted-foreground">
+                    {status.needsReapply && !status.externalChange
+                      ? 'В каталоге изменились адреса. Нажмите «Применить настройки», чтобы записать их в hosts.'
+                      : 'Управляемый блок не совпадает с сохранённым состоянием. Применение настроек перезапишет только блок SkipNet, остальные строки сохранятся.'}
+                  </div>
                 </div>
-                <div className="mt-0.5 text-[11px] text-muted-foreground">
-                  Управляемый блок не совпадает с сохранённым состоянием. Применение настроек
-                  перезапишет только блок SkipNet, остальные строки сохранятся.
-                </div>
-              </div>
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => { void runAction('apply', hostsApply) }}
-                disabled={busyAction !== null}
-              >
-                Применить настройки
-              </Button>
-            </CardContent>
-          </Card>
-        )}
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => { void runAction('apply', hostsApply) }}
+                  disabled={uiBusy}
+                >
+                  Применить настройки
+                </Button>
+              </CardContent>
+            </Card>
+          )}
 
         {error && (
           <Card className="border-red-500/40">
@@ -471,6 +480,9 @@ const Hosts: React.FC = () => {
                           : 'hosts'
                       const busy = busyService === service.id
                       const disabled = controlsLocked || busy
+                      const profileOptions = profiles.filter((profile) =>
+                        hasAnswers(service, profile.id)
+                      )
                       return (
                         <div
                           key={service.id}
@@ -504,18 +516,21 @@ const Hosts: React.FC = () => {
                                 onChange={(event) => {
                                   void setService(service, event.target.value)
                                 }}
-                                disabled={disabled}
-                                title="DNS-профиль"
+                                disabled={disabled || !on}
+                                title={on ? 'DNS-профиль' : 'Сначала включите сервис'}
                                 className={cn(
                                   'mt-1 h-7 max-w-full rounded-md border border-stroke bg-card/60 px-1.5 text-[11px] text-muted-foreground',
-                                  'outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-stroke'
+                                  'outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-stroke',
+                                  !on && 'opacity-60'
                                 )}
                               >
-                                {profiles.map((profile) => (
-                                  <option key={profile.id} value={profile.id}>
-                                    {profile.name}
-                                  </option>
-                                ))}
+                                {(profileOptions.length > 0 ? profileOptions : profiles).map(
+                                  (profile) => (
+                                    <option key={profile.id} value={profile.id}>
+                                      {profile.name}
+                                    </option>
+                                  )
+                                )}
                               </select>
                             ) : (
                               <span className="mt-1 inline-flex rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">

@@ -85,6 +85,8 @@ interface HostsFileStatus {
   appliedAt?: string
   /** True when the file no longer matches the last written state. */
   externalChange: boolean
+  /** True when the catalog/state would render a different managed block. */
+  needsReapply: boolean
   legacy: HostsLegacyBlocks
 }
 

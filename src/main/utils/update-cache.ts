@@ -1,6 +1,7 @@
 //
 
-import { existsSync, readFileSync, writeFileSync } from 'fs'
+import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'fs'
+import { randomUUID } from 'crypto'
 import path from 'path'
 import { dataDir } from './dirs'
 
@@ -23,7 +24,7 @@ export function loadUpdateCache<T>(name: string): PersistedUpdateCache<T> | null
     const p = cachePath(name)
     if (!existsSync(p)) return null
     const raw = readFileSync(p, 'utf8')
-    const parsed = JSON.parse(raw) as PersistedUpdateCache<T>
+    const parsed = JSON.parse(raw.replace(/^\uFEFF/, '')) as PersistedUpdateCache<T>
     if (typeof parsed?.at !== 'number' || !parsed?.data) return null
     return parsed
   } catch {
@@ -38,10 +39,20 @@ export function loadUpdateCache<T>(name: string): PersistedUpdateCache<T> | null
  * actual update check.
  */
 export function saveUpdateCache<T>(name: string, data: T): void {
+  const target = cachePath(name)
+  // Random + O_EXCL: the app may run elevated, and a fixed cache filename in
+  // userData could be pre-created as a hardlink to a privileged file.
+  const tmp = `${target}.${randomUUID()}.tmp`
   try {
     const payload: PersistedUpdateCache<T> = { at: Date.now(), data }
-    writeFileSync(cachePath(name), JSON.stringify(payload), 'utf8')
+    writeFileSync(tmp, JSON.stringify(payload), { encoding: 'utf8', flag: 'wx' })
+    renameSync(tmp, target)
   } catch (e) {
+    try {
+      unlinkSync(tmp)
+    } catch {
+      /* noop */
+    }
     console.warn(`[update-cache:${name}] write failed:`, e)
   }
 }

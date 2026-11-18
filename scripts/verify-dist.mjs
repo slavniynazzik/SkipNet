@@ -124,6 +124,34 @@ for (const asset of ['hosts-catalog.json', 'adobe-activation-hosts.json']) {
   check(existsSync(path.join(unpacked, 'resources', asset)), `missing resources/${asset}`)
 }
 
+const catalogPath = path.join(unpacked, 'resources', 'hosts-catalog.json')
+if (existsSync(catalogPath)) {
+  try {
+    const catalog = JSON.parse(readFileSync(catalogPath, 'utf8'))
+    check(
+      Array.isArray(catalog.services) && catalog.services.length > 0,
+      'hosts-catalog.json has no services'
+    )
+    check(
+      Array.isArray(catalog.dnsProfiles) && catalog.dnsProfiles.length > 0,
+      'hosts-catalog.json has no DNS profiles'
+    )
+    check(!!catalog.meta?.version, 'hosts-catalog.json has no meta.version')
+  } catch (e) {
+    check(false, `hosts-catalog.json is not valid JSON: ${e.message}`)
+  }
+}
+
+const adobePath = path.join(unpacked, 'resources', 'adobe-activation-hosts.json')
+if (existsSync(adobePath)) {
+  try {
+    const adobe = JSON.parse(readFileSync(adobePath, 'utf8'))
+    check(Array.isArray(adobe) && adobe.length > 0, 'adobe-activation-hosts.json is empty')
+  } catch (e) {
+    check(false, `adobe-activation-hosts.json is not valid JSON: ${e.message}`)
+  }
+}
+
 const installer = path.join(dist, 'SkipNet_x64.exe')
 check(existsSync(installer), 'missing dist/SkipNet_x64.exe')
 if (existsSync(installer)) check(statSync(installer).size > 50 * 1024 * 1024, 'installer is unexpectedly small')

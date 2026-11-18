@@ -1,4 +1,5 @@
 import { spawn, spawnSync, ChildProcess } from 'child_process'
+import { randomUUID } from 'crypto'
 import { existsSync, readdirSync, readFileSync, mkdirSync, rmSync, writeFileSync, renameSync } from 'fs'
 import path from 'path'
 import AdmZip from 'adm-zip'
@@ -139,8 +140,9 @@ export async function installZapretBundle(
   // every file is written. The previous bundle must survive a failed extract
   // (disk full, AV lock, corrupt entry) — deleting it first leaves Zapret
   // unstartable until the user reinstalls.
-  const staging = `${dest}.staging`
-  if (existsSync(staging)) rmSync(staging, { recursive: true, force: true })
+  // Random name: a pre-created `runtime\zapret.staging` junction could
+  // otherwise make rmSync delete an unrelated directory (the app is elevated).
+  const staging = `${dest}.staging-${randomUUID()}`
   mkdirSync(staging, { recursive: true })
 
   let written = 0
@@ -176,7 +178,7 @@ export async function installZapretBundle(
 
   // Swap the freshly extracted bundle into place. Keep the old one until the
   // new one is at its final path, then delete it best-effort.
-  const previous = `${dest}.previous-${Date.now()}`
+  const previous = `${dest}.previous-${randomUUID()}`
   const hadPrevious = existsSync(dest)
   if (hadPrevious) {
     try {

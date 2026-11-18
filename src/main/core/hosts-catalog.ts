@@ -10,6 +10,7 @@
 
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { mkdir, rename, writeFile, unlink } from 'node:fs/promises'
+import { randomUUID } from 'node:crypto'
 import { isIP } from 'node:net'
 import path from 'node:path'
 import { dataDir, resourcesDir } from '../utils/dirs'
@@ -25,6 +26,11 @@ const DEFAULT_REMOTE_URL =
 const HOSTNAME_RE =
   /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:\.(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?))*$/i
 
+// Service/profile ids are written into hosts comments and state keys. Keep
+// them free of whitespace/newlines so a malicious remote catalog cannot inject
+// extra lines into the managed block.
+const SAFE_ID_RE = /^[a-z0-9][a-z0-9._-]{0,127}$/i
+
 export interface LoadedHostsCatalog {
   catalog: HostsCatalog
   source: 'bundled' | 'downloaded'
@@ -37,6 +43,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function asString(value: unknown, field: string): string {
   if (typeof value !== 'string' || !value.trim()) {
     throw new Error(`каталог: поле ${field} должно быть непустой строкой`)
+  }
+  // eslint-disable-next-line no-control-regex -- intentionally reject control chars
+  if (/[\u0000-\u001f\u007f]/.test(value)) {
+    throw new Error(`каталог: поле ${field} содержит управляющие символы`)
   }
   return value
 }
@@ -66,6 +76,9 @@ function validateIps(value: unknown, field: string): string[] {
   if (!Array.isArray(value) || value.length === 0) {
     throw new Error(`каталог: ${field} должен быть непустым массивом IP`)
   }
+  if (value.length > 32) {
+    throw new Error(`каталог: ${field} содержит слишком много IP`)
+  }
   return [...new Set(value.map((ip) => validateIp(ip, field)))]
 }
 
@@ -93,10 +106,14 @@ export function validateHostsCatalog(input: unknown): HostsCatalog {
   if (!Array.isArray(input.dnsProfiles) || input.dnsProfiles.length === 0) {
     throw new Error('каталог: отсутствует список DNS-профилей')
   }
+  if (input.dnsProfiles.length > 32) {
+    throw new Error('каталог: слишком много DNS-профилей')
+  }
   const profileIds = new Set<string>()
   const dnsProfiles: HostsDnsProfile[] = input.dnsProfiles.map((raw, index) => {
     if (!isRecord(raw)) throw new Error(`каталог: dnsProfiles[${index}] должен быть объектом`)
     const id = asString(raw.id, `dnsProfiles[${index}].id`)
+    if (!SAFE_ID_RE.test(id)) throw new Error(`каталог: недопустимый id профиля ${id}`)
     if (profileIds.has(id)) throw new Error(`каталог: дубликат DNS-профиля ${id}`)
     profileIds.add(id)
     return {
@@ -114,6 +131,7 @@ export function validateHostsCatalog(input: unknown): HostsCatalog {
   const services: HostsService[] = input.services.map((raw, index) => {
     if (!isRecord(raw)) throw new Error(`каталог: services[${index}] должен быть объектом`)
     const id = asString(raw.id, `services[${index}].id`)
+    if (!SAFE_ID_RE.test(id)) throw new Error(`каталог: недопустимый id сервиса ${id}`)
     if (serviceIds.has(id)) throw new Error(`каталог: дубликат сервиса ${id}`)
     serviceIds.add(id)
 
@@ -138,6 +156,9 @@ export function validateHostsCatalog(input: unknown): HostsCatalog {
 
     if (kind === 'hosts') {
       if (!Array.isArray(raw.entries)) throw new Error(`каталог: ${id} не содержит entries`)
+      if (raw.entries.length > 2000) {
+        throw new Error(`каталог: ${id} содержит слишком много записей`)
+      }
       service.entries = raw.entries.map((entry, entryIndex) => {
         if (!isRecord(entry)) throw new Error(`каталог: ${id}.entries[${entryIndex}]`)
         return {
@@ -147,6 +168,9 @@ export function validateHostsCatalog(input: unknown): HostsCatalog {
       })
     } else {
       if (!Array.isArray(raw.domains)) throw new Error(`каталог: ${id} не содержит domains`)
+      if (raw.domains.length > 2000) {
+        throw new Error(`каталог: ${id} содержит слишком много доменов`)
+      }
       service.domains = raw.domains.map((domain, domainIndex) => {
         if (!isRecord(domain)) throw new Error(`каталог: ${id}.domains[${domainIndex}]`)
         const answersRaw = domain.answers
@@ -171,6 +195,15 @@ export function validateHostsCatalog(input: unknown): HostsCatalog {
   })
   services.sort((a, b) => a.order - b.order || a.name.localeCompare(b.name, 'ru'))
 
+  const totalHostnames = services.reduce(
+    (total, service) =>
+      total + (service.entries?.length ?? 0) + (service.domains?.length ?? 0),
+    0
+  )
+  if (totalHostnames > 30_000) {
+    throw new Error('каталог: слишком много доменов и записей')
+  }
+
   return { meta, dnsProfiles, services }
 }
 
@@ -180,13 +213,96 @@ function readCatalogFile(file: string): HostsCatalog | null {
     if (statSync(file).size > MAX_CATALOG_BYTES) {
       throw new Error('файл каталога слишком большой')
     }
-    const raw = JSON.parse(readFileSync(file, 'utf8')) as unknown
+    const text = readFileSync(file, 'utf8')
+    // The size can change between stat() and read(); check the bytes we
+    // actually parsed as well.
+    if (text.length > MAX_CATALOG_BYTES) {
+      throw new Error('файл каталога слишком большой')
+    }
+    const raw = JSON.parse(text.replace(/^\uFEFF/, '')) as unknown
     return validateHostsCatalog(raw)
   } catch (e) {
     console.warn(
       `[hosts-catalog] ${file}: ${e instanceof Error ? e.message : String(e)}`
     )
     return null
+  }
+}
+
+function readResponseTextCapped(res: Response, maxBytes: number): Promise<string> {
+  const declared = Number(res.headers.get('content-length') ?? '0')
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    throw new Error('Каталог слишком большой')
+  }
+  if (!res.body) {
+    return res.text().then((text) => {
+      if (text.length > maxBytes) throw new Error('Каталог слишком большой')
+      return text
+    })
+  }
+
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let total = 0
+  let text = ''
+  return (async () => {
+    try {
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) break
+        total += value.byteLength
+        if (total > maxBytes) {
+          await reader.cancel().catch(() => void 0)
+          throw new Error('Каталог слишком большой')
+        }
+        text += decoder.decode(value, { stream: true })
+      }
+      return text + decoder.decode()
+    } finally {
+      reader.releaseLock?.()
+    }
+  })()
+}
+
+/**
+ * A downloaded catalog may only update addresses for hostnames that already
+ * exist in the bundled catalog. It cannot introduce a new service or map a
+ * brand-new domain: that would let a compromised mirror add arbitrary
+ * privileged hosts entries. New services therefore arrive with an app update.
+ */
+function assertRemoteOnlyUpdatesKnownHostnames(
+  remote: HostsCatalog,
+  bundled: HostsCatalog
+): void {
+  const bundledById = new Map(bundled.services.map((service) => [service.id, service]))
+  for (const service of remote.services) {
+    const base = bundledById.get(service.id)
+    if (!base) {
+      throw new Error(
+        `Каталог добавляет новый сервис ${service.id}. Обновите приложение, чтобы получить его.`
+      )
+    }
+    if (service.kind !== base.kind) {
+      throw new Error(`Каталог меняет тип сервиса ${service.id}; обновите приложение.`)
+    }
+    const known = new Set<string>()
+    for (const entry of base.entries ?? []) known.add(entry.hostname)
+    for (const domain of base.domains ?? []) known.add(domain.hostname)
+    for (const entry of service.entries ?? []) {
+      if (!known.has(entry.hostname)) {
+        throw new Error(`Каталог добавляет новый домен ${entry.hostname}; обновите приложение.`)
+      }
+    }
+    for (const domain of service.domains ?? []) {
+      if (!known.has(domain.hostname)) {
+        throw new Error(`Каталог добавляет новый домен ${domain.hostname}; обновите приложение.`)
+      }
+    }
+  }
+  for (const service of bundled.services) {
+    if (!remote.services.some((item) => item.id === service.id)) {
+      throw new Error(`Каталог удаляет сервис ${service.id}; обновите приложение.`)
+    }
   }
 }
 
@@ -231,14 +347,33 @@ export function getHostsCatalog(): LoadedHostsCatalog {
   if (cache) return cache
 
   const bundled = readCatalogFile(bundledCatalogPath())
-  const downloaded = readCatalogFile(downloadedCatalogPath())
+  let downloaded = readCatalogFile(downloadedCatalogPath())
 
   if (!bundled && !downloaded) {
-    throw new Error(
-      'Каталог hosts не найден. Переустановите приложение или обновите каталог.'
-    )
+    throw new Error('Каталог hosts не найден. Переустановите приложение.')
   }
-  if (downloaded && (!bundled || compareVersion(downloaded.meta.version, bundled.meta.version) >= 0)) {
+
+  // A downloaded catalog in userData is not trusted blindly: it may only
+  // update addresses for services/hostnames that already exist in the bundled
+  // catalog. This also rejects a locally dropped catalog that would add new
+  // domains to the privileged hosts write.
+  if (downloaded && bundled) {
+    try {
+      assertRemoteOnlyUpdatesKnownHostnames(downloaded, bundled)
+    } catch (e) {
+      console.warn(
+        `[hosts-catalog] ignoring downloaded catalog: ${
+          e instanceof Error ? e.message : String(e)
+        }`
+      )
+      downloaded = null
+    }
+  }
+
+  if (
+    downloaded &&
+    (!bundled || compareVersion(downloaded.meta.version, bundled.meta.version) >= 0)
+  ) {
     cache = { catalog: downloaded, source: 'downloaded' }
     return cache
   }
@@ -267,9 +402,8 @@ export async function updateHostsCatalog(): Promise<HostsCatalogUpdateResult> {
   })
   if (!res.ok) throw new Error(`Не удалось скачать каталог: HTTP ${res.status}`)
 
-  const text = await res.text()
+  const text = (await readResponseTextCapped(res, MAX_CATALOG_BYTES)).replace(/^\uFEFF/, '')
   if (!text.trim()) throw new Error('Сервер вернул пустой каталог')
-  if (text.length > MAX_CATALOG_BYTES) throw new Error('Каталог слишком большой')
 
   let remote: HostsCatalog
   try {
@@ -280,16 +414,24 @@ export async function updateHostsCatalog(): Promise<HostsCatalogUpdateResult> {
     )
   }
 
+  const bundled = readCatalogFile(bundledCatalogPath())
+  if (!bundled) {
+    throw new Error('Встроенный каталог не найден; обновление каталога недоступно.')
+  }
+  assertRemoteOnlyUpdatesKnownHostnames(remote, bundled)
+
   const current = getHostsCatalog().catalog
   if (compareVersion(remote.meta.version, current.meta.version) <= 0) {
     return { version: current.meta.version, updated: false, source: getHostsCatalog().source }
   }
 
   const target = downloadedCatalogPath()
-  const tmp = `${target}.tmp`
+  // Random + O_EXCL avoids a pre-created .tmp name being a hardlink to a
+  // privileged file (the app may run elevated).
+  const tmp = `${target}.${randomUUID()}.tmp`
   try {
     await mkdir(path.dirname(target), { recursive: true })
-    await writeFile(tmp, text, 'utf8')
+    await writeFile(tmp, text, { encoding: 'utf8', flag: 'wx' })
     await rename(tmp, target)
   } catch (e) {
     try {

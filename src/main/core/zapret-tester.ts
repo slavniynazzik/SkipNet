@@ -1,5 +1,6 @@
 import { spawn, ChildProcess } from 'child_process'
-import { existsSync, readFileSync, writeFileSync } from 'fs'
+import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'fs'
+import { randomUUID } from 'crypto'
 import path from 'path'
 import { BrowserWindow } from 'electron'
 import { dataDir, zapretBundleDir } from '../utils/dirs'
@@ -74,7 +75,7 @@ export function getStrategyTestResults(): StrategyTestReport | null {
     const p = resultsPath()
     if (!existsSync(p)) return null
     const raw = readFileSync(p, 'utf8')
-    const parsed = JSON.parse(raw) as StrategyTestReport
+    const parsed = JSON.parse(raw.replace(/^\uFEFF/, '')) as StrategyTestReport
     if (parsed && typeof parsed.ranAt === 'number' && parsed.results) {
       cachedReport = parsed
       return parsed
@@ -86,10 +87,18 @@ export function getStrategyTestResults(): StrategyTestReport | null {
 }
 
 function saveReport(report: StrategyTestReport): void {
+  const target = resultsPath()
+  const tmp = `${target}.${randomUUID()}.tmp`
   try {
-    writeFileSync(resultsPath(), JSON.stringify(report, null, 2), 'utf8')
+    writeFileSync(tmp, JSON.stringify(report, null, 2), { encoding: 'utf8', flag: 'wx' })
+    renameSync(tmp, target)
     cachedReport = report
   } catch (e) {
+    try {
+      unlinkSync(tmp)
+    } catch {
+      /* noop */
+    }
     console.warn('[zapret-tester] save report failed:', e)
   }
 }

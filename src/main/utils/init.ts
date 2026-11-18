@@ -9,7 +9,8 @@
 } from './dirs'
 import { defaultConfig } from './template'
 import { stringifyYaml } from './yaml'
-import { mkdir, writeFile, copyFile } from 'fs/promises'
+import { mkdir, writeFile, copyFile, rename, unlink } from 'fs/promises'
+import { randomUUID } from 'crypto'
 import { existsSync } from 'fs'
 import { spawn } from 'child_process'
 import path from 'path'
@@ -77,17 +78,26 @@ async function initConfig(): Promise<void> {
   // The primary config vanished (crash between unlink/rename in older builds,
   // an over-eager cleaner or Antivirus quarantine). Restore the last
   // known-good backup instead of silently replacing all user settings with
-  // the defaults.
+  // the defaults. Write through a random temp file so a pre-created hardlink
+  // at the live path cannot redirect the elevated write.
   const backupPath = `${configPath}.backup`
-  if (existsSync(backupPath)) {
-    try {
-      await copyFile(backupPath, configPath)
-      return
-    } catch {
-      /* fall through to defaults */
+  const tmpPath = `${configPath}.${randomUUID()}.tmp`
+  try {
+    if (existsSync(backupPath)) {
+      await copyFile(backupPath, tmpPath)
+    } else {
+      await writeFile(tmpPath, stringifyYaml(defaultConfig), { encoding: 'utf8', flag: 'wx' })
     }
+    await rename(tmpPath, configPath)
+  } catch {
+    try {
+      await unlink(tmpPath)
+    } catch {
+      /* noop */
+    }
+    await writeFile(tmpPath, stringifyYaml(defaultConfig), { encoding: 'utf8', flag: 'wx' })
+    await rename(tmpPath, configPath)
   }
-  await writeFile(configPath, stringifyYaml(defaultConfig))
 }
 
 function initDeeplink(): void {

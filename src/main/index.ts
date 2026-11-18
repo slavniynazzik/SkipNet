@@ -344,8 +344,32 @@ export async function createWindow(appConfig?: AppConfig): Promise<void> {
   })
 
   mainWindow.webContents.setWindowOpenHandler((details) => {
-    shell.openExternal(details.url)
+    try {
+      const target = new URL(details.url)
+      if (target.protocol === 'https:' || target.protocol === 'http:') {
+        shell.openExternal(details.url)
+      }
+    } catch {
+      /* invalid URL — deny silently */
+    }
     return { action: 'deny' }
+  })
+
+  // The renderer only ever needs the local app page. A navigation to a remote
+  // origin would keep the preload and its IPC access, so block cross-origin
+  // navigation (hash changes and reloads of the same page stay allowed).
+  const preventCrossOriginNavigation = (event: Electron.Event, url: string): void => {
+    try {
+      const current = new URL(mainWindow?.webContents.getURL() || '')
+      const next = new URL(url)
+      if (next.origin !== current.origin) event.preventDefault()
+    } catch {
+      event.preventDefault()
+    }
+  }
+  mainWindow.webContents.on('will-navigate', preventCrossOriginNavigation)
+  mainWindow.webContents.on('will-redirect', (event, url) => {
+    preventCrossOriginNavigation(event as Electron.Event, url)
   })
 
   if (is.dev && process.env['ELECTRON_RENDERER_URL']) {

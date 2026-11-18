@@ -8,10 +8,15 @@
 
 import { existsSync, readFileSync } from 'node:fs'
 import { mkdir, rename, unlink, writeFile } from 'node:fs/promises'
+import { randomUUID } from 'node:crypto'
 import path from 'node:path'
 import { dataDir } from '../utils/dirs'
 
 const STATE_FILE = 'hosts-state.json'
+
+function hasAnswers(service: HostsService, profileId: string): boolean {
+  return (service.domains ?? []).some((domain) => (domain.answers[profileId]?.length ?? 0) > 0)
+}
 
 export function hostsStatePath(): string {
   return path.join(dataDir(), STATE_FILE)
@@ -57,14 +62,27 @@ export function normalizeHostsState(input: unknown, catalog: HostsCatalog): Host
     const value = raw.selection?.[service.id]
     if (service.kind === 'hosts') {
       selection[service.id] = value === 'hosts' ? 'hosts' : 'off'
-    } else if (typeof value === 'string' && profileIds.has(value)) {
-      selection[service.id] = value
-    } else if (value === 'hosts') {
-      // A DNS service cannot use the pinned-address mode. Treat the old value
-      // as "enabled with the default profile" instead of silently disabling it.
-      selection[service.id] = defaultProfile
     } else {
-      selection[service.id] = 'off'
+      // A DNS service cannot use the pinned-address mode, and a profile that
+      // has no answers for this service would render an empty entry set.
+      const wasEnabled = typeof value === 'string' && value !== 'off'
+      if (!wasEnabled) {
+        selection[service.id] = 'off'
+      } else if (
+        typeof value === 'string' &&
+        profileIds.has(value) &&
+        hasAnswers(service, value)
+      ) {
+        selection[service.id] = value
+      } else {
+        const fallback = [defaultProfile, ...catalog.dnsProfiles.map((p) => p.id)].find(
+          (profileId) =>
+            !!profileId &&
+            profileIds.has(profileId) &&
+            hasAnswers(service, profileId)
+        )
+        selection[service.id] = fallback ?? 'off'
+      }
     }
   }
 
@@ -83,7 +101,7 @@ export function loadHostsState(catalog: HostsCatalog): HostsState {
   const file = hostsStatePath()
   try {
     if (!existsSync(file)) return defaultHostsState(catalog)
-    const parsed = JSON.parse(readFileSync(file, 'utf8')) as unknown
+    const parsed = JSON.parse(readFileSync(file, 'utf8').replace(/^\uFEFF/, '')) as unknown
     return normalizeHostsState(parsed, catalog)
   } catch (e) {
     console.warn(
@@ -95,10 +113,13 @@ export function loadHostsState(catalog: HostsCatalog): HostsState {
 
 export async function saveHostsState(state: HostsState): Promise<void> {
   const target = hostsStatePath()
-  const tmp = `${target}.tmp`
+  const tmp = `${target}.${randomUUID()}.tmp`
   try {
     await mkdir(path.dirname(target), { recursive: true })
-    await writeFile(tmp, `${JSON.stringify(state, null, 2)}\n`, 'utf8')
+    await writeFile(tmp, `${JSON.stringify(state, null, 2)}\n`, {
+      encoding: 'utf8',
+      flag: 'wx'
+    })
     await rename(tmp, target)
   } catch (e) {
     try {

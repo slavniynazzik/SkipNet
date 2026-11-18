@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, writeFileSync, renameSync, unlinkSync } from 'fs'
 import path from 'path'
 import { spawn } from 'child_process'
-import { createHash } from 'crypto'
+import { createHash, randomUUID } from 'crypto'
 import { tgwsRuntimeDir } from '../utils/dirs'
 import { getAppConfig, patchAppConfig } from '../config'
 import { loadUpdateCache, saveUpdateCache } from '../utils/update-cache'
@@ -255,9 +255,9 @@ export async function installTgwsUpdate(
   const dest = path.join(dir, 'TgWsProxy_windows.exe')
   // Write to a staging file first so a failed write cannot truncate the
   // working binary that is currently on disk.
-  const tmp = `${dest}.tmp`
+  const tmp = `${dest}.${randomUUID()}.tmp`
   try {
-    writeFileSync(tmp, buf)
+    writeFileSync(tmp, buf, { flag: 'wx' })
     renameSync(tmp, dest)
   } catch (e) {
     try {

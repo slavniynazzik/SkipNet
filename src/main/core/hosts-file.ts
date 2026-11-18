@@ -8,6 +8,7 @@
  */
 
 import { accessSync, constants, existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
+import { createHash, randomUUID } from 'node:crypto'
 import os from 'node:os'
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
@@ -16,9 +17,18 @@ import { psQuote, runPowerShellElevated } from '../utils/elevated'
 const BLOCK_START = '# --- SkipNet hosts editor BEGIN ---'
 const BLOCK_END = '# --- SkipNet hosts editor END ---'
 
+function windowsRoot(): string {
+  const raw = (process.env.SystemRoot || process.env.windir || 'C:\\Windows').replace(
+    /[\\/]+$/,
+    ''
+  )
+  // Do not let an inherited environment variable redirect a privileged write
+  // to an arbitrary directory.
+  return /^[a-z]:\\(?:Windows|WINNT)$/i.test(raw) ? raw : 'C:\\Windows'
+}
+
 export function windowsHostsPath(): string {
-  const root = process.env.SystemRoot || process.env.windir || 'C:\\Windows'
-  return path.join(root, 'System32', 'drivers', 'etc', 'hosts')
+  return path.join(windowsRoot(), 'System32', 'drivers', 'etc', 'hosts')
 }
 
 /** Read the hosts file byte-for-byte (latin1 round-trips arbitrary bytes). */
@@ -28,6 +38,17 @@ export function readHostsRaw(): string {
   } catch {
     return ''
   }
+}
+
+/**
+ * Strict variant for mutations: a missing file is treated as empty, but an
+ * existing unreadable file must abort the write. Otherwise a transient AV lock
+ * would look like an empty file and the next save would delete every entry.
+ */
+export function readHostsRawStrict(): string {
+  const target = windowsHostsPath()
+  if (!existsSync(target)) return ''
+  return readFileSync(target).toString('latin1')
 }
 
 /** Read the hosts file as UTF-8 for display/diagnostics. */
@@ -45,8 +66,10 @@ export function hostsFileExists(): boolean {
 
 /** Best-effort write-access probe (the real check is the write attempt). */
 export function hostsFileWritable(): boolean {
+  const target = windowsHostsPath()
   try {
-    accessSync(windowsHostsPath(), constants.W_OK)
+    if (existsSync(target)) accessSync(target, constants.W_OK)
+    else accessSync(path.dirname(target), constants.W_OK)
     return true
   } catch {
     return false
@@ -73,10 +96,17 @@ export function writeHostsContentTo(target: string, content: string): HostsWrite
     writeFileSync(target, Buffer.from(content, 'latin1'))
     return { ok: true, elevated: false }
   } catch (directError) {
-    const tempPath = path.join(os.tmpdir(), `skipnet-hosts-new-${Date.now()}.txt`)
+    const tempPath = path.join(os.tmpdir(), `skipnet-hosts-new-${randomUUID()}.txt`)
     try {
-      writeFileSync(tempPath, Buffer.from(content, 'latin1'))
+      const payload = Buffer.from(content, 'latin1')
+      writeFileSync(tempPath, payload, { flag: 'wx' })
+      const expected = createHash('sha256').update(payload).digest('hex')
+      // The elevated copy verifies the bytes, so a process that swaps the
+      // %TEMP% file while the UAC prompt is open cannot inject hosts entries.
       const script =
+        `$expected = '${expected}'\r\n` +
+        `$actual = (Get-FileHash -LiteralPath ${psQuote(tempPath)} -Algorithm SHA256).Hash.ToLower()\r\n` +
+        "if ($actual -ne $expected) { Write-Error 'hosts checksum mismatch'; exit 1 }\r\n" +
         'try {\r\n' +
         `  Copy-Item -LiteralPath ${psQuote(tempPath)} -Destination ${psQuote(target)} -Force -ErrorAction Stop\r\n` +
         '} catch {\r\n' +
@@ -110,7 +140,7 @@ export function writeHostsContentTo(target: string, content: string): HostsWrite
 
 export function flushDns(): { ok: boolean; message: string } {
   try {
-    const result = spawnSync('ipconfig.exe', ['/flushdns'], {
+    const result = spawnSync(path.join(windowsRoot(), 'System32', 'ipconfig.exe'), ['/flushdns'], {
       windowsHide: true,
       timeout: 10_000,
       encoding: 'utf8'

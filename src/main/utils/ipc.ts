@@ -221,11 +221,29 @@ function openTelegramLink(url: string): Promise<void> {
 }
 
 /**
+ * Only the main app frame may invoke privileged handlers. A remote page that
+ * somehow ends up in this BrowserWindow must not be able to write hosts,
+ * install updates or start processes.
+ */
+function isTrustedSender(event: Electron.IpcMainInvokeEvent): boolean {
+  const frame = event.senderFrame
+  if (!frame) return false
+  const url = frame.url || ''
+  if (url.startsWith('file://')) return true
+  const devUrl = process.env['ELECTRON_RENDERER_URL']
+  if (devUrl && url.startsWith(devUrl)) return true
+  return /^http:\/\/(?:localhost|127\.0\.0\.1):\d+\//.test(url)
+}
+
+/**
  * Thin wrapper so any unhandled error in an IPC handler is serialised
  * back to the caller as `{ ok: false, message }` instead of crashing.
  */
 function h<T>(fn: (...args: unknown[]) => Promise<T> | T) {
   return async (_event: Electron.IpcMainInvokeEvent, ...args: unknown[]) => {
+    if (!isTrustedSender(_event)) {
+      return { ok: false, message: 'IPC rejected: untrusted sender' }
+    }
     try {
       const value = await fn(...args)
       return { ok: true, value }
