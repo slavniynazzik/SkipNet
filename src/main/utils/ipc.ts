@@ -48,7 +48,19 @@ import {
   type SetGameFilterInput
 } from '../core/zapret-settings'
 import { getFakesStatus, replaceActiveFake, type FakeKind } from '../core/zapret-fakes'
-import { checkZapretHosts, prepareHostsUpdate, applyHostsUpdate } from '../core/zapret-hosts'
+import {
+  disableAllHostsServices,
+  flushHostsDns,
+  getHostsOverview,
+  importLegacyHostsBlocks,
+  openHostsFile,
+  reapplyHostsState,
+  refreshHostsCatalog,
+  restoreLatestHostsBackup,
+  setHostsAdobeBlock,
+  setHostsDnsForAll,
+  setHostsServiceSelection
+} from '../core/hosts-editor'
 import {
   listWorkshopWallpapers,
   openWorkshopItem,
@@ -317,10 +329,22 @@ export function registerIpcMainHandlers(): void {
     return replaceActiveFake(value, String(name ?? ''))
   }))
 
-  // ---- Zapret hosts / diagnostics / maintenance ---------------------------
-  ipcMain.handle('zapret:checkHosts', h(() => checkZapretHosts()))
-  ipcMain.handle('zapret:prepareHostsUpdate', h(() => prepareHostsUpdate()))
-  ipcMain.handle('zapret:applyHosts', h(() => applyHostsUpdate()))
+  // ---- Hosts editor -------------------------------------------------------
+  ipcMain.handle('hosts:overview', h(() => getHostsOverview()))
+  ipcMain.handle('hosts:setService', h((id, value) =>
+    setHostsServiceSelection(String(id ?? ''), value)
+  ))
+  ipcMain.handle('hosts:setDnsForAll', h((profile) => setHostsDnsForAll(String(profile ?? ''))))
+  ipcMain.handle('hosts:disableAll', h(() => disableAllHostsServices()))
+  ipcMain.handle('hosts:setAdobe', h((enabled) => setHostsAdobeBlock(Boolean(enabled))))
+  ipcMain.handle('hosts:importLegacy', h(() => importLegacyHostsBlocks()))
+  ipcMain.handle('hosts:apply', h(() => reapplyHostsState()))
+  ipcMain.handle('hosts:restoreLatest', h(() => restoreLatestHostsBackup()))
+  ipcMain.handle('hosts:openFile', h(() => openHostsFile()))
+  ipcMain.handle('hosts:flushDns', h(() => flushHostsDns()))
+  ipcMain.handle('hosts:updateCatalog', h(() => refreshHostsCatalog()))
+
+  // ---- Zapret diagnostics / maintenance -----------------------------------
   ipcMain.handle('zapret:diagnostics', h(() => runZapretDiagnostics()))
   ipcMain.handle('zapret:diagnosticsFix', h((fix) => {
     const id = fix as DiagFixId

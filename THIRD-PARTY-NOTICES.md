@@ -141,6 +141,26 @@ readable list.
 
 ---
 
+## 7. ZapretGUI hosts catalog
+
+`resources/hosts-catalog.json` and `resources/adobe-activation-hosts.json`
+are generated from the hosts catalog distributed with **Zapret 2 GUI**
+(`hosts_catalog.sqlite3`). The catalog contains service names, domains,
+DNS-profile names and pre-computed address answers.
+
+- Source application: Zapret 2 GUI / Zapret-WinGUI
+- Converter: `scripts/import-hosts-catalog.py`
+- If you do not have permission to redistribute this data, replace
+  `resources/hosts-catalog.json` with your own catalog (or remove it) before
+  publishing a build. The application validates and loads whatever catalog is
+  shipped in `resources/`.
+
+The Adobe activation host list is a common community block list. It is only
+applied when the user explicitly enables the «Блокировать активацию Adobe»
+toggle.
+
+---
+
 ## How attribution works in practice
 
 * Every source file copied or substantially adapted from one of the

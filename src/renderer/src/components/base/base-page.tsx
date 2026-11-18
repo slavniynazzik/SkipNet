@@ -12,6 +12,7 @@ const sidebarPaths = new Set([
   '/home',
   '/telegram',
   '/zapret',
+  '/hosts',
   '/logs',
   '/settings',
   '/about'

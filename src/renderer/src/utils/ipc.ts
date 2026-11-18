@@ -243,25 +243,29 @@ export const zapretGetFakes = (): Promise<FakesStatus> => invoke('zapret:getFake
 export const zapretReplaceFake = (kind: FakeKind, name: string): Promise<FakesStatus> =>
   invoke('zapret:replaceFake', kind, name)
 
-// ---- Zapret hosts / diagnostics / maintenance -----------------------------
-export interface HostsCheckResult {
-  hostsPath: string
-  hostsExists: boolean
-  upToDate: boolean
-  needsUpdate: boolean
-  firstLine: string
-  lastLine: string
-  entries: number
-  tempPath?: string
-}
-export interface HostsApplyResult {
-  ok: boolean
-  message: string
-  hostsPath: string
-  entries: number
-  backupPath?: string
-  elevated: boolean
-}
+// ---- Hosts editor ----------------------------------------------------------
+export const hostsGetOverview = (): Promise<HostsOverview> => invoke('hosts:overview')
+export const hostsSetService = (
+  id: string,
+  value: HostsSelection
+): Promise<HostsOperationResult> => invoke('hosts:setService', id, value)
+export const hostsSetDnsForAll = (profile: string): Promise<HostsOperationResult> =>
+  invoke('hosts:setDnsForAll', profile)
+export const hostsDisableAll = (): Promise<HostsOperationResult> => invoke('hosts:disableAll')
+export const hostsSetAdobe = (enabled: boolean): Promise<HostsOperationResult> =>
+  invoke('hosts:setAdobe', enabled)
+export const hostsImportLegacy = (): Promise<HostsOperationResult> =>
+  invoke('hosts:importLegacy')
+export const hostsApply = (): Promise<HostsOperationResult> => invoke('hosts:apply')
+export const hostsRestoreLatest = (): Promise<HostsOperationResult> =>
+  invoke('hosts:restoreLatest')
+export const hostsOpenFile = (): Promise<void> => invoke('hosts:openFile')
+export const hostsFlushDns = (): Promise<{ ok: boolean; message: string }> =>
+  invoke('hosts:flushDns')
+export const hostsUpdateCatalog = (): Promise<HostsCatalogUpdateResult> =>
+  invoke('hosts:updateCatalog')
+
+// ---- Zapret diagnostics / maintenance --------------------------------------
 export type DiagStatus = 'ok' | 'warn' | 'fail' | 'info'
 export type DiagFixId = 'tcpTimestamps' | 'windivert' | 'conflictingBypasses' | 'discordCache'
 export interface DiagCheck {
@@ -291,10 +295,6 @@ export interface DiscordCacheResult {
   failed: string[]
   found: boolean
 }
-export const zapretCheckHosts = (): Promise<HostsCheckResult> => invoke('zapret:checkHosts')
-export const zapretPrepareHostsUpdate = (): Promise<HostsCheckResult> =>
-  invoke('zapret:prepareHostsUpdate')
-export const zapretApplyHosts = (): Promise<HostsApplyResult> => invoke('zapret:applyHosts')
 export const zapretRunDiagnostics = (): Promise<DiagnosticsReport> =>
   invoke('zapret:diagnostics')
 export const zapretDiagnosticsFix = (fix: DiagFixId): Promise<DiagnosticsFixResult> =>

@@ -120,6 +120,10 @@ for (const asset of ['icon.ico', 'icon.png', 'icon_on.ico', 'icon_on.png', 'icon
   check(existsSync(path.join(unpacked, 'resources', asset)), `missing resources/${asset}`)
 }
 
+for (const asset of ['hosts-catalog.json', 'adobe-activation-hosts.json']) {
+  check(existsSync(path.join(unpacked, 'resources', asset)), `missing resources/${asset}`)
+}
+
 const installer = path.join(dist, 'SkipNet_x64.exe')
 check(existsSync(installer), 'missing dist/SkipNet_x64.exe')
 if (existsSync(installer)) check(statSync(installer).size > 50 * 1024 * 1024, 'installer is unexpectedly small')

@@ -5,8 +5,6 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronRight,
-  Download,
-  ExternalLink,
   FileText,
   Info,
   Loader2,
@@ -20,20 +18,17 @@ import { Card, CardContent, CardHeader, CardTitle } from '@renderer/components/u
 import { Button } from '@renderer/components/ui/button'
 import { Switch } from '@renderer/components/ui/switch'
 import { cn } from '@renderer/lib/utils'
+import { useNavigate } from 'react-router-dom'
 import {
-  zapretApplyHosts,
-  zapretCheckHosts,
   zapretClearDiscordCache,
   zapretDiagnosticsFix,
   zapretGetAutoUpdateCheck,
-  zapretPrepareHostsUpdate,
   zapretRunDiagnostics,
   zapretRunTests,
   zapretSetAutoUpdateCheck,
   type DiagCheck,
   type DiagStatus,
-  type DiagnosticsReport,
-  type HostsCheckResult
+  type DiagnosticsReport
 } from '@renderer/utils/ipc'
 
 interface Props {
@@ -44,11 +39,9 @@ interface Props {
 
 const ZapretMaintenanceCard: React.FC<Props> = ({ disabled = false, disabledReason, refreshKey }) => {
   const [open, setOpen] = useState(false)
+  const navigate = useNavigate()
   const [autoUpdate, setAutoUpdate] = useState<boolean | null>(null)
   const [savingAuto, setSavingAuto] = useState(false)
-  const [hosts, setHosts] = useState<HostsCheckResult | null>(null)
-  const [hostsBusy, setHostsBusy] = useState(false)
-  const [hostsApplying, setHostsApplying] = useState(false)
   const [report, setReport] = useState<DiagnosticsReport | null>(null)
   const [diagBusy, setDiagBusy] = useState(false)
   const [fixing, setFixing] = useState<string | null>(null)
@@ -72,85 +65,6 @@ const ZapretMaintenanceCard: React.FC<Props> = ({ disabled = false, disabledReas
       })
     } finally {
       setSavingAuto(false)
-    }
-  }
-
-  const checkHosts = async (): Promise<void> => {
-    if (hostsBusy) return
-    setHostsBusy(true)
-    const tId = toast.loading('Проверяем файл hosts…')
-    try {
-      const result = await zapretCheckHosts()
-      setHosts(result)
-      if (result.needsUpdate) {
-        toast.warning('Файл hosts требует обновления', {
-          id: tId,
-          description: 'Нажмите «Открыть для обновления», чтобы скопировать записи вручную.'
-        })
-      } else {
-        toast.success('Файл hosts актуален', { id: tId })
-      }
-    } catch (e) {
-      toast.error('Не удалось проверить hosts', {
-        id: tId,
-        description: e instanceof Error ? e.message : String(e)
-      })
-    } finally {
-      setHostsBusy(false)
-    }
-  }
-
-  const openHosts = async (): Promise<void> => {
-    if (hostsBusy) return
-    setHostsBusy(true)
-    const tId = toast.loading('Скачиваем актуальный hosts…')
-    try {
-      const result = await zapretPrepareHostsUpdate()
-      setHosts(result)
-      toast.success('Файл открыт в Блокноте', {
-        id: tId,
-        description: 'Скопируйте его содержимое в открытый файл hosts (нужны права администратора).'
-      })
-    } catch (e) {
-      toast.error('Не удалось подготовить hosts', {
-        id: tId,
-        description: e instanceof Error ? e.message : String(e)
-      })
-    } finally {
-      setHostsBusy(false)
-    }
-  }
-
-  const applyHosts = async (): Promise<void> => {
-    if (hostsBusy || hostsApplying) return
-    if (
-      !window.confirm(
-        'Записать актуальные записи в системный файл hosts?\n\n' +
-          'Текущий файл будет сохранён рядом как hosts.skipnet-backup.'
-      )
-    ) {
-      return
-    }
-    setHostsApplying(true)
-    const tId = toast.loading('Обновляем файл hosts…')
-    try {
-      const result = await zapretApplyHosts()
-      toast.success(result.message, {
-        id: tId,
-        description: `Записей: ${result.entries}. Zapret больше не нужно обновлять вручную.`
-      })
-      try {
-        setHosts(await zapretCheckHosts())
-      } catch {
-        /* the write already succeeded; a failed re-check is cosmetic */
-      }
-    } catch (e) {
-      toast.error('Не удалось обновить файл hosts', {
-        id: tId,
-        description: e instanceof Error ? e.message : String(e)
-      })
-    } finally {
-      setHostsApplying(false)
     }
   }
 
@@ -307,52 +221,19 @@ const ZapretMaintenanceCard: React.FC<Props> = ({ disabled = false, disabledReas
           />
         </div>
 
-        <div className="rounded-lg border border-stroke bg-muted/20 p-3">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="min-w-0">
-              <div className="flex items-center gap-2 text-sm">
-                <FileText className="h-4 w-4 text-muted-foreground" />
-                Файл hosts
-              </div>
-              <div className="mt-0.5 text-[11px] text-muted-foreground">
-                {hosts
-                  ? hosts.needsUpdate
-                    ? 'Требуется обновление — записи из репозитория не найдены.'
-                    : 'Актуален — записи из репозитория уже есть.'
-                  : 'Проверка не выполнялась.'}
-              </div>
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-stroke bg-muted/20 px-3 py-2">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2 text-sm">
+              <FileText className="h-4 w-4 text-muted-foreground" />
+              Файл hosts
             </div>
-            <div className="flex shrink-0 flex-wrap gap-2">
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => { void checkHosts() }}
-                disabled={locked || hostsBusy || hostsApplying}
-              >
-                {hostsBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
-                Проверить
-              </Button>
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => { void openHosts() }}
-                disabled={locked || hostsBusy || hostsApplying}
-                title="Скачать актуальный hosts и открыть его рядом с системным файлом (ручное копирование)"
-              >
-                <ExternalLink className="h-3.5 w-3.5" />
-                Открыть
-              </Button>
-              <Button
-                size="sm"
-                onClick={() => { void applyHosts() }}
-                disabled={locked || hostsBusy || hostsApplying}
-                title="Скачать актуальный hosts и записать его в системный файл автоматически"
-              >
-                {hostsApplying ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
-                Обновить
-              </Button>
+            <div className="mt-0.5 text-[11px] text-muted-foreground">
+              Сервисы, DNS-профили и записи управляются в отдельном редакторе.
             </div>
           </div>
+          <Button size="sm" variant="outline" onClick={() => navigate('/hosts')}>
+            Открыть редактор
+          </Button>
         </div>
 
         {report ? (
