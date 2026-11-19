@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./src/renderer/src/assets/logo_black.svg" alt="Логотип SkipNet" width="144" />
+  <img src="./src/renderer/src/assets/logo.png" alt="Логотип SkipNet" width="144" />
 </p>
 
 <h1 align="center">SkipNet</h1>
