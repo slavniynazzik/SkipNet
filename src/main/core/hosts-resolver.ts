@@ -58,12 +58,25 @@ export interface ResolveStats {
   /** per-source success counters, useful in the operation message */
   sources: Record<string, number>
   timedOut: boolean
+  /** The caller aborted the sweep; `resolved` holds whatever was verified. */
+  cancelled: boolean
 }
 
 export interface ResolveResult {
   /** hostname → up to two verified IPv4 addresses, fastest first */
   resolved: Record<string, string[]>
   stats: ResolveStats
+}
+
+/** Injectable resolution step, used by the tests instead of DoH + TLS. */
+export type ResolveOneFn = (hostname: string, signal?: AbortSignal) => Promise<HostResult>
+
+export interface ResolveOptions {
+  deadlineMs?: number
+  /** Cooperative cancellation: checked before each host and each TLS probe. */
+  signal?: AbortSignal
+  /** Test seam. */
+  deps?: { resolveOne?: ResolveOneFn }
 }
 
 function isPublicIpv4(ip: string): boolean {
@@ -104,9 +117,15 @@ async function fromSystem(hostname: string): Promise<string[]> {
   }
 }
 
-async function fromDoh(source: DohSource, hostname: string): Promise<string[]> {
+async function fromDoh(
+  source: DohSource,
+  hostname: string,
+  signal?: AbortSignal
+): Promise<string[]> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), DOH_TIMEOUT_MS)
+  const onAbort = (): void => controller.abort()
+  signal?.addEventListener('abort', onAbort, { once: true })
   try {
     const response = await fetch(source.url(hostname), {
       headers: source.headers,
@@ -128,6 +147,7 @@ async function fromDoh(source: DohSource, hostname: string): Promise<string[]> {
     return []
   } finally {
     clearTimeout(timer)
+    signal?.removeEventListener('abort', onAbort)
   }
 }
 
@@ -136,8 +156,14 @@ async function fromDoh(source: DohSource, hostname: string): Promise<string[]> {
  * the handshake time in milliseconds, or null when the certificate is not
  * valid for the hostname / the connection is reset.
  */
-function tlsProbe(hostname: string, ip: string): Promise<number | null> {
+function tlsProbe(hostname: string, ip: string, signal?: AbortSignal): Promise<number | null> {
   return new Promise((resolve) => {
+    // Checked before every handshake so a cancelled refresh stops opening new
+    // sockets instead of running the full candidate list first.
+    if (signal?.aborted) {
+      resolve(null)
+      return
+    }
     let settled = false
     const started = Date.now()
     const socket = tls.connect({
@@ -148,13 +174,16 @@ function tlsProbe(hostname: string, ip: string): Promise<number | null> {
       timeout: TLS_TIMEOUT_MS
     })
 
+    const onAbort = (): void => finish(null)
     const finish = (latency: number | null): void => {
       if (settled) return
       settled = true
+      signal?.removeEventListener('abort', onAbort)
       socket.destroy()
       resolve(latency)
     }
 
+    signal?.addEventListener('abort', onAbort, { once: true })
     socket.once('secureConnect', () => {
       finish(socket.authorized ? Date.now() - started : null)
     })
@@ -169,11 +198,12 @@ interface HostResult {
   sourceHits: Record<string, number>
 }
 
-async function resolveOne(hostname: string): Promise<HostResult> {
+async function resolveOne(hostname: string, signal?: AbortSignal): Promise<HostResult> {
   const sourceHits: Record<string, number> = {}
+  if (signal?.aborted) return { hostname, ips: [], sourceHits }
   const [system, ...doh] = await Promise.all([
     fromSystem(hostname),
-    ...DOH_SOURCES.map((source) => fromDoh(source, hostname))
+    ...DOH_SOURCES.map((source) => fromDoh(source, hostname, signal))
   ])
 
   const candidates = new Set<string>()
@@ -187,10 +217,10 @@ async function resolveOne(hostname: string): Promise<HostResult> {
   DOH_SOURCES.forEach((source, index) => add(source.id, doh[index] ?? []))
 
   const list = [...candidates].slice(0, CANDIDATES_PER_HOST)
-  if (list.length === 0) return { hostname, ips: [], sourceHits }
+  if (list.length === 0 || signal?.aborted) return { hostname, ips: [], sourceHits }
 
   const probed = await Promise.all(
-    list.map(async (ip) => ({ ip, latency: await tlsProbe(hostname, ip) }))
+    list.map(async (ip) => ({ ip, latency: await tlsProbe(hostname, ip, signal) }))
   )
   const verified = probed
     .filter((item): item is { ip: string; latency: number } => item.latency !== null)
@@ -206,30 +236,37 @@ async function resolveOne(hostname: string): Promise<HostResult> {
  *
  * Resolution runs with a bounded pool so a large selection (hundreds of
  * hostnames) still finishes in a reasonable time without opening thousands of
- * sockets at once. `deadlineMs` lets the caller stop early and keep whatever
- * has been verified so far.
+ * sockets at once. `deadlineMs` and `signal` let the caller stop early and keep
+ * whatever has been verified so far; the caller reports it as partial.
  */
 export async function resolveHosts(
   hostnames: string[],
-  options: { deadlineMs?: number } = {}
+  options: ResolveOptions = {}
 ): Promise<ResolveResult> {
   const unique = [...new Set(hostnames.map((host) => host.trim().toLowerCase()))]
     .filter((host) => host.length > 0 && isIP(host) === 0)
     .slice(0, MAX_HOSTS)
 
   const deadline = Date.now() + (options.deadlineMs ?? 300_000)
+  const signal = options.signal
+  const resolve = options.deps?.resolveOne ?? resolveOne
   const resolved: Record<string, string[]> = {}
   const stats: ResolveStats = {
     checked: 0,
     resolved: 0,
     addresses: 0,
     sources: {},
-    timedOut: false
+    timedOut: false,
+    cancelled: false
   }
 
   let index = 0
   const worker = async (): Promise<void> => {
     for (;;) {
+      if (signal?.aborted) {
+        stats.cancelled = true
+        return
+      }
       if (Date.now() > deadline) {
         stats.timedOut = true
         return
@@ -238,7 +275,11 @@ export async function resolveHosts(
       index += 1
       if (!current) return
 
-      const result = await resolveOne(current)
+      const result = await resolve(current, signal)
+      if (signal?.aborted) {
+        stats.cancelled = true
+        return
+      }
       stats.checked += 1
       for (const [source, hits] of Object.entries(result.sourceHits)) {
         stats.sources[source] = (stats.sources[source] ?? 0) + hits

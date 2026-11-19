@@ -18,11 +18,12 @@
  * module (the current wallpaper plus scanned Workshop assets) are served.
  */
 
-import { createReadStream, existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
+import { createReadStream, existsSync, statSync } from 'node:fs'
+import { promises as fs } from 'node:fs'
 import { Readable } from 'node:stream'
 import path from 'node:path'
 import os from 'node:os'
-import { spawnSync } from 'node:child_process'
+import { execFile } from 'node:child_process'
 import { BrowserWindow, dialog, protocol, shell } from 'electron'
 
 const WALLPAPER_ENGINE_APP_ID = '431960'
@@ -196,29 +197,40 @@ export function initWallpaperProtocol(): void {
 
 // ---- Steam libraries ------------------------------------------------------
 
-function regQuery(key: string, value: string): string | null {
-  try {
-    const r = spawnSync('reg.exe', ['query', key, '/v', value], {
-      windowsHide: true,
-      timeout: 5000,
-      encoding: 'utf8'
-    })
-    const out = `${r.stdout ?? ''}\n${r.stderr ?? ''}`
-    const match = new RegExp(`${value}\\s+REG_SZ\\s+(.+)$`, 'im').exec(out)
-    return match?.[1]?.trim() || null
-  } catch {
-    return null
-  }
+function regQuery(key: string, value: string): Promise<string | null> {
+  return new Promise((resolve) => {
+    // `reg.exe` used to be a spawnSync here: a Steam scan then froze the main
+    // process for as long as the registry answered (CA10).
+    execFile(
+      'reg.exe',
+      ['query', key, '/v', value],
+      { windowsHide: true, timeout: 5000, encoding: 'utf8' },
+      (error, stdout, stderr) => {
+        if (error) {
+          resolve(null)
+          return
+        }
+        const out = `${stdout ?? ''}\n${stderr ?? ''}`
+        const match = new RegExp(`${value}\\s+REG_SZ\\s+(.+)$`, 'im').exec(out)
+        resolve(match?.[1]?.trim() || null)
+      }
+    )
+  })
 }
 
-function steamRoots(): string[] {
+async function steamRoots(): Promise<string[]> {
   const roots = new Set<string>()
   const candidates: Array<string | null> = []
   if (process.platform === 'win32') {
-    candidates.push(
+    const [steamPath, wow6432, hklm] = await Promise.all([
       regQuery('HKCU\\Software\\Valve\\Steam', 'SteamPath'),
       regQuery('HKLM\\SOFTWARE\\WOW6432Node\\Valve\\Steam', 'InstallPath'),
-      regQuery('HKLM\\SOFTWARE\\Valve\\Steam', 'InstallPath'),
+      regQuery('HKLM\\SOFTWARE\\Valve\\Steam', 'InstallPath')
+    ])
+    candidates.push(
+      steamPath,
+      wow6432,
+      hklm,
       process.env.ProgramFiles ? path.join(process.env.ProgramFiles, 'Steam') : null,
       process.env['ProgramFiles(x86)']
         ? path.join(process.env['ProgramFiles(x86)']!, 'Steam')
@@ -243,11 +255,10 @@ interface SteamLibrary {
   workshopDir?: string
 }
 
-function readLibraryFolders(steamRoot: string): string[] {
+async function readLibraryFolders(steamRoot: string): Promise<string[]> {
   const vdf = path.join(steamRoot, 'steamapps', 'libraryfolders.vdf')
-  if (!existsSync(vdf)) return []
   try {
-    const text = readFileSync(vdf, 'utf8')
+    const text = await fs.readFile(vdf, 'utf8')
     const libraries: string[] = []
     const re = /"path"\s+"([^"]+)"/gi
     let match: RegExpExecArray | null
@@ -262,12 +273,12 @@ function readLibraryFolders(steamRoot: string): string[] {
 }
 
 /** All Steam libraries that contain downloaded Wallpaper Engine items. */
-function wallpaperLibraries(): SteamLibrary[] {
-  const roots = steamRoots()
+async function wallpaperLibraries(): Promise<SteamLibrary[]> {
+  const roots = await steamRoots()
   const all = new Set<string>()
   for (const root of roots) {
     all.add(root)
-    for (const lib of readLibraryFolders(root)) all.add(path.resolve(lib))
+    for (const lib of await readLibraryFolders(root)) all.add(path.resolve(lib))
   }
   const result: SteamLibrary[] = []
   for (const lib of all) {
@@ -284,12 +295,15 @@ interface ProjectJson {
   preview?: string
 }
 
-function readProject(dir: string): ProjectJson | null {
+const MAX_PROJECT_BYTES = 1024 * 1024
+
+async function readProject(dir: string): Promise<ProjectJson | null> {
   try {
     const file = path.join(dir, 'project.json')
     // Refuse absurdly large metadata files (Workshop content is untrusted).
-    if (statSync(file).size > 1024 * 1024) return null
-    const project = JSON.parse(readFileSync(file, 'utf8')) as ProjectJson
+    const stat = await fs.stat(file)
+    if (!stat.isFile() || stat.size > MAX_PROJECT_BYTES) return null
+    const project = JSON.parse(await fs.readFile(file, 'utf8')) as ProjectJson
     if (!project || typeof project !== 'object') return null
     return project
   } catch {
@@ -310,14 +324,19 @@ function classify(file: string | undefined): 'image' | 'video' | null {
  * the item folder. Without this check a malicious item could point `file` at
  * an arbitrary local file and have it served to the renderer.
  */
-function itemFile(dir: string, relative: string | undefined): string | undefined {
+async function itemFile(dir: string, relative: string | undefined): Promise<string | undefined> {
   if (!relative) return undefined
   const root = path.resolve(dir)
   const resolved = path.resolve(root, relative)
   if (resolved !== root && !resolved.toLowerCase().startsWith(`${root.toLowerCase()}${path.sep}`)) {
     return undefined
   }
-  return existsSync(resolved) ? resolved : undefined
+  try {
+    const stat = await fs.stat(resolved)
+    return stat.isFile() ? resolved : undefined
+  } catch {
+    return undefined
+  }
 }
 
 /**
@@ -327,53 +346,100 @@ function itemFile(dir: string, relative: string | undefined): string | undefined
  *
  * Results are cached briefly: the renderer resolves the wallpaper whenever
  * the config changes, and rescanning thousands of Workshop folders on every
- * render would be wasteful.
+ * render would be wasteful. `force` is reserved for the explicit
+ * «Обновить список» button.
+ *
+ * The scan is fully asynchronous (CA10): `fs.promises` for every metadata and
+ * preview lookup, bounded parallelism so a huge library cannot exhaust file
+ * descriptors, and a yield between Steam roots so a slow network drive does
+ * not stall IPC.
  */
+const WORKSHOP_CACHE_TTL_MS = 20_000
+const MAX_PARALLEL_ITEMS = 8
+
 let workshopCache: { at: number; items: WorkshopWallpaper[] } | null = null
 
-export function listWorkshopWallpapers(force = false): WorkshopWallpaper[] {
-  if (!force && workshopCache && Date.now() - workshopCache.at < 20_000) {
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<R>
+): Promise<R[]> {
+  const results: R[] = new Array(items.length)
+  let index = 0
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      const current = index
+      index += 1
+      if (current >= items.length) return
+      results[current] = await fn(items[current])
+    }
+  }
+  await Promise.all(
+    Array.from({ length: Math.min(limit, items.length) }, () => worker())
+  )
+  return results
+}
+
+async function scanWorkshopItem(
+  workshopDir: string,
+  id: string
+): Promise<WorkshopWallpaper | null> {
+  const dir = path.join(workshopDir, id)
+  try {
+    const stat = await fs.stat(dir)
+    if (!stat.isDirectory()) return null
+  } catch {
+    return null
+  }
+  const project = await readProject(dir)
+  if (!project) return null
+
+  // Two preview/source probes per item, capped by the scan concurrency.
+  const [previewPath, sourcePath] = await Promise.all([
+    itemFile(dir, project.preview),
+    itemFile(dir, project.file)
+  ])
+  const kind = classify(sourcePath)
+  const playable = kind !== null
+  const mediaPath = playable ? sourcePath! : previewPath
+  if (!mediaPath) return null
+  allow(mediaPath)
+  allow(previewPath)
+  return {
+    id,
+    title: (project.title || `Workshop ${id}`).trim() || `Workshop ${id}`,
+    type: project.type || 'Unknown',
+    playable,
+    mediaPath,
+    previewPath,
+    dir
+  }
+}
+
+export async function listWorkshopWallpapers(force = false): Promise<WorkshopWallpaper[]> {
+  if (
+    !force &&
+    workshopCache &&
+    Date.now() - workshopCache.at < WORKSHOP_CACHE_TTL_MS
+  ) {
     return workshopCache.items
   }
   const items: WorkshopWallpaper[] = []
-  for (const library of wallpaperLibraries()) {
+  for (const library of await wallpaperLibraries()) {
     if (!library.workshopDir) continue
     let entries: string[] = []
     try {
-      entries = readdirSync(library.workshopDir)
+      entries = await fs.readdir(library.workshopDir)
     } catch {
       continue
     }
-    for (const id of entries) {
-      if (!/^\d+$/.test(id)) continue
-      const dir = path.join(library.workshopDir, id)
-      let isDir = false
-      try {
-        isDir = statSync(dir).isDirectory()
-      } catch {
-        continue
-      }
-      if (!isDir) continue
-      const project = readProject(dir)
-      if (!project) continue
-      const previewPath = itemFile(dir, project.preview)
-      const sourcePath = itemFile(dir, project.file)
-      const kind = classify(sourcePath)
-      const playable = kind !== null
-      const mediaPath = playable ? sourcePath! : previewPath
-      if (!mediaPath) continue
-      allow(mediaPath)
-      allow(previewPath)
-      items.push({
-        id,
-        title: (project.title || `Workshop ${id}`).trim() || `Workshop ${id}`,
-        type: project.type || 'Unknown',
-        playable,
-        mediaPath,
-        previewPath,
-        dir
-      })
-    }
+    const ids = entries.filter((id) => /^\d+$/.test(id))
+    const found = await mapWithConcurrency(ids, MAX_PARALLEL_ITEMS, (id) =>
+      scanWorkshopItem(library.workshopDir!, id)
+    )
+    for (const item of found) if (item) items.push(item)
+    // Yield between Steam roots (a library may live on a slow network drive).
+    await new Promise<void>((resolve) => setImmediate(resolve))
   }
   items.sort((a, b) => a.title.localeCompare(b.title, 'ru'))
   workshopCache = { at: Date.now(), items }
@@ -406,8 +472,9 @@ export async function pickWallpaperFile(): Promise<WallpaperPickResult> {
   return { path: file, name: path.basename(file) }
 }
 
-function findWorkshopItem(id: string): WorkshopWallpaper | undefined {
-  return listWorkshopWallpapers().find((item) => item.id === id)
+async function findWorkshopItem(id: string): Promise<WorkshopWallpaper | undefined> {
+  const items = await listWorkshopWallpapers()
+  return items.find((item) => item.id === id)
 }
 
 /**
@@ -415,7 +482,7 @@ function findWorkshopItem(id: string): WorkshopWallpaper | undefined {
  * Unknown/missing sources degrade to `kind: 'none'` with an explanatory note
  * instead of throwing — the app must still start if the user deleted the file.
  */
-export function resolveWallpaper(config?: WallpaperConfig): WallpaperState {
+export async function resolveWallpaper(config?: WallpaperConfig): Promise<WallpaperState> {
   const opacity = clamp(config?.opacity, 10, 100, 100)
   const blur = clamp(config?.blur, 0, 32, 0)
   const dim = clamp(config?.dim, 0, 90, 0)
@@ -424,7 +491,7 @@ export function resolveWallpaper(config?: WallpaperConfig): WallpaperState {
   }
 
   if (config.source === 'workshop') {
-    const item = config.workshopId ? findWorkshopItem(config.workshopId) : undefined
+    const item = config.workshopId ? await findWorkshopItem(config.workshopId) : undefined
     if (!item) {
       return {
         enabled: true,

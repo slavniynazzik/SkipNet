@@ -51,6 +51,7 @@ export const INVOKE_CHANNELS = Object.freeze([
 
   // ---- Zapret strategy tester --------------------------------------------
   'zapret:runStrategyTest',
+  'zapret:cancelStrategyTest',
   'zapret:getStrategyTestResults',
   'zapret:isStrategyTestRunning',
 

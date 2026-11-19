@@ -267,11 +267,53 @@ export function withZapretLock<T>(fn: () => Promise<T>): Promise<T> {
   return withLock(fn)
 }
 
+/**
+ * The strategy tester shares winws.exe with the normal Start/Stop controls but
+ * must not hold the operation lock for the whole sweep (CA5: 4–6 minutes of a
+ * frozen UI). Instead it registers a cancellable session; Start/Stop ask it to
+ * stop and wait (bounded) before taking over winws.exe.
+ */
+export interface StrategyTestSession {
+  /** Ask the tester to stop its current strategy and persist a report. */
+  abort: () => void
+  /** Resolves once the tester has killed its own child and left the loop. */
+  done: Promise<void>
+}
+
+let strategyTestSession: StrategyTestSession | null = null
+
+export function registerStrategyTestSession(session: StrategyTestSession): void {
+  strategyTestSession = session
+}
+
+export function unregisterStrategyTestSession(session: StrategyTestSession): void {
+  if (strategyTestSession === session) strategyTestSession = null
+}
+
+/** Upper bound for waiting on a pre-empted sweep; it should be much faster. */
+const STRATEGY_TEST_PREEMPT_TIMEOUT_MS = 3_000
+
+async function preemptStrategyTest(): Promise<void> {
+  const session = strategyTestSession
+  if (!session) return
+  session.abort()
+  await Promise.race([
+    session.done,
+    new Promise<void>((resolve) => setTimeout(resolve, STRATEGY_TEST_PREEMPT_TIMEOUT_MS))
+  ])
+}
+
 export function startZapret(): Promise<void> {
-  return withLock(() => startZapretImpl())
+  return withLock(async () => {
+    await preemptStrategyTest()
+    await startZapretImpl()
+  })
 }
 export function stopZapret(): Promise<void> {
-  return withLock(() => stopZapretImpl())
+  return withLock(async () => {
+    await preemptStrategyTest()
+    await stopZapretImpl()
+  })
 }
 
 /** Kill any orphan winws.exe instances by image name. */

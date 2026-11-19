@@ -341,8 +341,8 @@ export interface WallpaperPickResult {
   path?: string
   name?: string
 }
-export const wallpaperListWorkshop = (): Promise<WorkshopWallpaper[]> =>
-  invoke('wallpaper:listWorkshop')
+export const wallpaperListWorkshop = (force = false): Promise<WorkshopWallpaper[]> =>
+  invoke('wallpaper:listWorkshop', force)
 export const wallpaperPick = (): Promise<WallpaperPickResult> => invoke('wallpaper:pick')
 export const wallpaperResolve = (): Promise<WallpaperState> => invoke('wallpaper:resolve')
 export const wallpaperOpenWorkshop = (id: string): Promise<void> =>

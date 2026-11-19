@@ -59,12 +59,14 @@ const WallpaperCard: React.FC = () => {
     void patchAppConfig({ wallpaper: { ...wallpaper, ...next } })
   }
 
-  const loadWorkshop = async (): Promise<void> => {
+  // The list is cached for 20 s in the main process; only the explicit
+  // «Обновить список» button forces a rescan of the Steam libraries.
+  const loadWorkshop = async (force = false): Promise<void> => {
     if (listBusy) return
     setListBusy(true)
     const tId = toast.loading('Ищем обои в Steam Workshop…')
     try {
-      const items = await wallpaperListWorkshop()
+      const items = await wallpaperListWorkshop(force)
       setWorkshop(items)
       if (items.length === 0) {
         toast.warning('Обои Workshop не найдены', {
@@ -188,7 +190,7 @@ const WallpaperCard: React.FC = () => {
                     size="sm"
                     variant="outline"
                     disabled={listBusy}
-                    onClick={() => { void loadWorkshop() }}
+                    onClick={() => { void loadWorkshop(true) }}
                   >
                     {listBusy
                       ? <Loader2 className="h-3.5 w-3.5 animate-spin" />

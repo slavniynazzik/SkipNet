@@ -23,7 +23,7 @@ import {
 import { createHash, randomUUID } from 'node:crypto'
 import os from 'node:os'
 import path from 'node:path'
-import { spawnSync } from 'node:child_process'
+import { execFile } from 'node:child_process'
 import { psQuote, runPowerShellElevated } from '../utils/elevated'
 
 const BLOCK_START = '# --- SkipNet hosts editor BEGIN ---'
@@ -39,8 +39,19 @@ function windowsRoot(): string {
   return /^[a-z]:\\(?:Windows|WINNT)$/i.test(raw) ? raw : 'C:\\Windows'
 }
 
+/**
+ * Test seam: the unit suite must never read or write the real system hosts
+ * file. Deliberately not backed by an environment variable or the config —
+ * nothing the renderer can influence may redirect a privileged write.
+ */
+let hostsPathOverride: string | null = null
+
+export function setHostsPathForTesting(target: string | null): void {
+  hostsPathOverride = target
+}
+
 export function windowsHostsPath(): string {
-  return path.join(windowsRoot(), 'System32', 'drivers', 'etc', 'hosts')
+  return hostsPathOverride ?? path.join(windowsRoot(), 'System32', 'drivers', 'etc', 'hosts')
 }
 
 /** Read the hosts file byte-for-byte (latin1 round-trips arbitrary bytes). */
@@ -61,6 +72,37 @@ export function readHostsRawStrict(): string {
   const target = windowsHostsPath()
   if (!existsSync(target)) return ''
   return readFileSync(target).toString('latin1')
+}
+
+export interface LenientHostsRead {
+  /** Bytes of the file, or `''` when the file is missing or unreadable. */
+  content: string
+  /** False only when an existing file could not be read (EPERM/EBUSY/…). */
+  ok: boolean
+  error?: string
+}
+
+/**
+ * Lenient variant for read-only paths (page loads, overview snapshots).
+ *
+ * A transient AV/indexer lock must render the saved state with a warning, not
+ * break the whole page. Mutations still use `readHostsRawStrict` so a lock can
+ * never be mistaken for an empty file and delete every entry.
+ */
+export function readHostsRawLenient(): LenientHostsRead {
+  const target = windowsHostsPath()
+  try {
+    if (!existsSync(target)) return { content: '', ok: true }
+    return { content: readFileSync(target).toString('latin1'), ok: true }
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException)?.code
+    if (code === 'ENOENT') return { content: '', ok: true }
+    return {
+      content: '',
+      ok: false,
+      error: e instanceof Error ? e.message : String(e)
+    }
+  }
 }
 
 /** Read the hosts file as UTF-8 for display/diagnostics. */
@@ -249,26 +291,51 @@ export function writeHostsContentTo(target: string, content: string): HostsWrite
   }
 }
 
-export function flushDns(): { ok: boolean; message: string } {
-  try {
-    const result = spawnSync(path.join(windowsRoot(), 'System32', 'ipconfig.exe'), ['/flushdns'], {
-      windowsHide: true,
-      timeout: 10_000,
-      encoding: 'utf8'
-    })
-    if (result.status === 0) {
-      return { ok: true, message: 'DNS-кэш очищен.' }
-    }
-    return {
-      ok: false,
-      message: `ipconfig /flushdns завершился с кодом ${result.status ?? '?'}.`
-    }
-  } catch (e) {
-    return {
-      ok: false,
-      message: e instanceof Error ? e.message : String(e)
-    }
-  }
+export interface DnsFlushResult {
+  ok: boolean
+  message: string
+}
+
+/**
+ * `ipconfig /flushdns` asynchronously.
+ *
+ * This used to be a `spawnSync` with a 10 s timeout (CA10): it froze the whole
+ * main process — including every IPC call and the window — while DNS was
+ * flushed. `execFile` keeps the event loop responsive and the timeout still
+ * bounds a hung utility.
+ */
+export function flushDns(): Promise<DnsFlushResult> {
+  return new Promise((resolve) => {
+    const target = path.join(windowsRoot(), 'System32', 'ipconfig.exe')
+    execFile(
+      target,
+      ['/flushdns'],
+      { windowsHide: true, timeout: 10_000, encoding: 'utf8' },
+      (error, _stdout, stderr) => {
+        if (!error) {
+          resolve({ ok: true, message: 'DNS-кэш очищен.' })
+          return
+        }
+        const detail = `${stderr ?? ''}`.trim()
+        if (detail) {
+          resolve({ ok: false, message: detail })
+          return
+        }
+        const code = (error as NodeJS.ErrnoException).code
+        if (code === 'ETIMEDOUT' || (error as { killed?: boolean }).killed) {
+          resolve({ ok: false, message: 'ipconfig /flushdns не завершился за 10 с.' })
+          return
+        }
+        resolve({
+          ok: false,
+          message:
+            code === 'ENOENT'
+              ? `ipconfig.exe не найден (${target}).`
+              : error.message
+        })
+      }
+    )
+  })
 }
 
 export const HOSTS_BLOCK_START = BLOCK_START

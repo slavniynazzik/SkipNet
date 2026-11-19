@@ -182,6 +182,26 @@ export interface LoadHostsStateOptions {
   hostsContent?: string
   /** Injected clock for tests. */
   now?: () => Date
+  /** Injected reader so a transient I/O error can be exercised in tests. */
+  readText?: (file: string) => string
+}
+
+/**
+ * Errors that mean "the file is there but Windows would not give it to us",
+ * as opposed to "the bytes are not valid JSON". Renaming a perfectly good
+ * state file because Defender held it for a moment would lose the user's
+ * selection, so these are surfaced as a warning instead of a recovery.
+ */
+function isTransientReadError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code
+  return (
+    code === 'EPERM' ||
+    code === 'EACCES' ||
+    code === 'EBUSY' ||
+    code === 'EMFILE' ||
+    code === 'ENFILE' ||
+    code === 'EAGAIN'
+  )
 }
 
 function corruptStatePath(file: string, now: () => Date): string {
@@ -273,15 +293,40 @@ async function recoverCorruptState(
 /**
  * Async variant used by the hosts editor: recovers a corrupt state file as a
  * side effect and reports what happened so the UI can show a banner.
+ *
+ * A transient read failure (AV/indexer holding `hosts-state.json`) does not
+ * count as corruption: the file is left untouched and defaults are returned
+ * with a `readWarning` instead.
  */
 export async function loadHostsStateRecovering(
   catalog: HostsCatalog,
   options: LoadHostsStateOptions = {}
-): Promise<{ state: HostsState; recovery?: HostsStateRecovery }> {
+): Promise<{ state: HostsState; recovery?: HostsStateRecovery; readWarning?: string }> {
   const file = hostsStatePath()
+  const readText = options.readText ?? ((target: string) => readFileSync(target, 'utf8'))
+  if (!existsSync(file)) return { state: defaultHostsState(catalog) }
+
+  let raw: string
   try {
-    if (!existsSync(file)) return { state: defaultHostsState(catalog) }
-    const parsed = JSON.parse(readFileSync(file, 'utf8').replace(/^\uFEFF/, '')) as unknown
+    raw = readText(file)
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException | undefined)?.code
+    if (code === 'ENOENT') return { state: defaultHostsState(catalog) }
+    if (isTransientReadError(e)) {
+      const warning =
+        'Не удалось прочитать файл состояния hosts (файл занят другим процессом). ' +
+        'Показан выбор по умолчанию; существующий файл не изменён — повторите позже.'
+      appLog(
+        'warn',
+        `hosts-state: ${e instanceof Error ? e.message : String(e)} — чтение отложено`
+      )
+      return { state: defaultHostsState(catalog), readWarning: warning }
+    }
+    return recoverCorruptState(catalog, file, options)
+  }
+
+  try {
+    const parsed = JSON.parse(raw.replace(/^\uFEFF/, '')) as unknown
     return { state: normalizeHostsState(parsed, catalog) }
   } catch {
     return recoverCorruptState(catalog, file, options)

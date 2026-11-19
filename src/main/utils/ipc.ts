@@ -22,6 +22,7 @@ import {
 } from '../core/zapret-updater'
 import {
   runStrategyTests,
+  cancelStrategyTest,
   getStrategyTestResults,
   isStrategyTestRunning
 } from '../core/zapret-tester'
@@ -367,6 +368,7 @@ export function registerIpcMainHandlers(): void {
 
     // ---- Zapret strategy tester ------------------------------------------
     'zapret:runStrategyTest': h(() => runStrategyTests()),
+    'zapret:cancelStrategyTest': h(() => cancelStrategyTest('user')),
     'zapret:getStrategyTestResults': h(() => getStrategyTestResults()),
     'zapret:isStrategyTestRunning': h(() => isStrategyTestRunning()),
 
@@ -448,7 +450,9 @@ export function registerIpcMainHandlers(): void {
     'zapret:clearDiscordCache': h(() => clearDiscordCache()),
 
     // ---- Wallpaper --------------------------------------------------------
-    'wallpaper:listWorkshop': h(() => listWorkshopWallpapers(true)),
+    // Cache is honoured by default; only the explicit «Обновить список»
+    // button passes `true` to force a rescan (CA10).
+    'wallpaper:listWorkshop': h((force) => listWorkshopWallpapers(force === true)),
     'wallpaper:pick': h(() => pickWallpaperFile()),
     'wallpaper:resolve': h(async () => {
       const cfg = await getAppConfig()

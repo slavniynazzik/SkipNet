@@ -119,6 +119,12 @@ interface HostsFileStatus {
   needsReapply: boolean
   legacy: HostsLegacyBlocks
   recovery?: HostsStateRecovery
+  /**
+   * Set when the page could be rendered but the file/state could not be read
+   * this time (EPERM/EBUSY from AV or an indexer). The saved settings are
+   * shown instead of failing the whole page.
+   */
+  readWarning?: string
 }
 
 interface HostsOverview {

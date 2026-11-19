@@ -1,8 +1,26 @@
+/**
+ * Zapret strategy sweep ("тест стратегий").
+ *
+ * The sweep has to start and stop winws.exe once per strategy, which is why it
+ * needs to cooperate with the normal Start/Stop controls. Before CA5 it held
+ * `withZapretLock` for the whole 4–6 minute run, so a user toggle simply hung.
+ *
+ * Now:
+ *  - the operation lock is taken only at short boundaries (clean-up + spawn,
+ *    and the final clean-up), never across the warm-up or the HTTPS probes;
+ *  - the run registers a cancellable session with `zapret.ts`; `startZapret`
+ *    and `stopZapret` pre-empt it instead of queueing behind it;
+ *  - an `AbortController` (and the `zapret:cancelStrategyTest` channel) stops
+ *    the current strategy, persists a report with `cancelled: true` and
+ *    restores the strategy that was active before the sweep;
+ *  - a hard 10-minute deadline and the app `before-quit` hook abort it too.
+ */
+
 import { spawn, ChildProcess } from 'child_process'
 import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'fs'
 import { randomUUID } from 'crypto'
 import path from 'path'
-import { BrowserWindow } from 'electron'
+import { app, BrowserWindow } from 'electron'
 import { dataDir, zapretBundleDir } from '../utils/dirs'
 import {
   ensureWinDivertReady,
@@ -10,8 +28,11 @@ import {
   isWinwsRunning,
   killWinws,
   listStrategies,
+  registerStrategyTestSession,
   startZapret,
-  withZapretLock
+  unregisterStrategyTestSession,
+  withZapretLock,
+  type StrategyDescriptor
 } from './zapret'
 import { getAppConfig } from '../config'
 import { verifyZapretBundle } from './binary-integrity'
@@ -35,6 +56,8 @@ const STRATEGY_WARMUP_MS = 4500
 const STRATEGY_BOOT_TIMEOUT_MS = 6000
 const PASS_THRESHOLD = 0.5
 const RESULTS_FILENAME = 'zapret-test-results.json'
+/** Hard ceiling for one sweep, whatever the strategy count. */
+export const STRATEGY_TEST_DEADLINE_MS = 10 * 60_000
 
 // Same shape as the renderer-side type in renderer/utils/ipc.ts —
 // kept duplicated to avoid leaking renderer types into main code.
@@ -52,9 +75,11 @@ export interface StrategyTestReport {
   bundleVersion?: string
   results: Record<string, StrategyTestResult>
   bestStrategy?: string
+  /** True when the sweep was stopped early (cancel, deadline or pre-empt). */
+  cancelled?: boolean
 }
 
-interface TestProgress {
+export interface TestProgress {
   phase: 'starting' | 'testing' | 'completed' | 'error' | 'idle'
   current?: number
   total?: number
@@ -63,7 +88,16 @@ interface TestProgress {
   message?: string
 }
 
+/** Why a sweep stopped early. */
+export type StrategyTestCancelReason = 'user' | 'preempted' | 'deadline' | 'quit'
+
+interface ActiveRun {
+  controller: AbortController
+  reason: StrategyTestCancelReason | null
+}
+
 let runningPromise: Promise<StrategyTestReport> | null = null
+let activeRun: ActiveRun | null = null
 let cachedReport: StrategyTestReport | null = null
 
 function resultsPath(): string {
@@ -104,14 +138,10 @@ function saveReport(report: StrategyTestReport): void {
   }
 }
 
-function broadcast(channel: string, payload: TestProgress): void {
+function broadcast(payload: TestProgress): void {
   for (const w of BrowserWindow.getAllWindows()) {
-    if (!w.isDestroyed()) w.webContents.send(channel, payload)
+    if (!w.isDestroyed()) w.webContents.send('zapret:testProgress', payload)
   }
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms))
 }
 
 interface ProbeResult {
@@ -122,10 +152,44 @@ interface ProbeResult {
   error?: string
 }
 
-async function probeOne(url: string): Promise<ProbeResult> {
+/** Resolves as soon as `signal` aborts (or never, when no signal is given). */
+function aborted(signal?: AbortSignal): Promise<null> {
+  return new Promise((resolve) => {
+    if (!signal) return
+    if (signal.aborted) {
+      resolve(null)
+      return
+    }
+    signal.addEventListener('abort', () => resolve(null), { once: true })
+  })
+}
+
+/** `setTimeout` that resolves early when the sweep is cancelled. */
+function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal?.aborted) {
+      resolve()
+      return
+    }
+    let timer: NodeJS.Timeout | null = null
+    const onAbort = (): void => {
+      if (timer) clearTimeout(timer)
+      resolve()
+    }
+    timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort)
+      resolve()
+    }, ms)
+    signal?.addEventListener('abort', onAbort, { once: true })
+  })
+}
+
+async function probeOne(url: string, signal?: AbortSignal): Promise<ProbeResult> {
   const t0 = Date.now()
   const ctrl = new AbortController()
   const timer = setTimeout(() => ctrl.abort(), PROBE_TIMEOUT_MS)
+  const onAbort = (): void => ctrl.abort()
+  signal?.addEventListener('abort', onAbort, { once: true })
   try {
     const res = await fetch(url, {
       method: 'HEAD',
@@ -137,7 +201,7 @@ async function probeOne(url: string): Promise<ProbeResult> {
     })
     return {
       url,
-      // 2xx/3xx (incl. manual redirect) and 4xx all mean the server
+      // 2xx/3xx (incl. manual redirect) and 4xx all mean the server is up.
       ok: res.status >= 200 && res.status < 600,
       status: res.status,
       ms: Date.now() - t0
@@ -151,23 +215,50 @@ async function probeOne(url: string): Promise<ProbeResult> {
     }
   } finally {
     clearTimeout(timer)
+    signal?.removeEventListener('abort', onAbort)
   }
 }
 
-async function probeAll(): Promise<ProbeResult[]> {
-  return Promise.all(HTTP_TARGETS.map(probeOne))
+async function probeAll(signal?: AbortSignal): Promise<ProbeResult[]> {
+  return Promise.all(HTTP_TARGETS.map((url) => probeOne(url, signal)))
 }
 
-async function killChildTree(pid: number | undefined): Promise<void> {
-  if (!pid) return
-  await new Promise<void>((r) => {
+function killChildTree(pid: number | undefined): Promise<void> {
+  if (!pid) return Promise.resolve()
+  return new Promise<void>((r) => {
     const p = spawn('taskkill.exe', ['/F', '/T', '/PID', String(pid)], { windowsHide: true })
     p.on('exit', () => r())
     p.on('error', () => r())
   })
 }
 
-async function spawnStrategy(batPath: string): Promise<ChildProcess> {
+/** The parts of a `ChildProcess` the sweep actually uses (fake-able in tests). */
+export interface StrategyChild {
+  pid?: number
+  exitCode?: number | null
+}
+
+export interface StrategyTesterDeps {
+  bundleDir: () => string
+  verifyBundle: (dir: string) => void
+  strategies: () => StrategyDescriptor[]
+  status: () => CoreStatus
+  getConfig: () => Promise<AppConfig | null>
+  withZapretLock: <T>(fn: () => Promise<T>) => Promise<T>
+  killWinws: () => Promise<void>
+  killChildTree: (pid: number | undefined) => Promise<void>
+  spawnStrategy: (batPath: string) => StrategyChild
+  isWinwsRunning: () => Promise<boolean>
+  ensureWinDivertReady: () => void
+  probeAll: (signal: AbortSignal) => Promise<ProbeResult[]>
+  startZapret: () => Promise<void>
+  broadcast: (payload: TestProgress) => void
+  saveReport: (report: StrategyTestReport) => void
+  exists: (file: string) => boolean
+  now: () => number
+}
+
+function spawnStrategy(batPath: string): ChildProcess {
   const dir = zapretBundleDir()
   const c = spawn('cmd.exe', ['/c', batPath], {
     cwd: dir,
@@ -188,117 +279,200 @@ async function spawnStrategy(batPath: string): Promise<ChildProcess> {
   return c
 }
 
-async function testOneStrategy(batPath: string): Promise<{
+function defaultDeps(): StrategyTesterDeps {
+  return {
+    bundleDir: zapretBundleDir,
+    verifyBundle: verifyZapretBundle,
+    strategies: listStrategies,
+    status: getZapretStatus,
+    getConfig: () => getAppConfig().catch(() => null),
+    withZapretLock,
+    killWinws,
+    killChildTree,
+    spawnStrategy,
+    isWinwsRunning,
+    ensureWinDivertReady: () => ensureWinDivertReady(),
+    probeAll: (signal) => probeAll(signal),
+    startZapret,
+    broadcast,
+    saveReport,
+    exists: existsSync,
+    now: () => Date.now()
+  }
+}
+
+interface StrategyScore {
   okCount: number
   totalCount: number
   score: number
   passed: boolean
-}> {
+}
+
+/**
+ * Run one strategy and score it. Returns null when the sweep was cancelled.
+ *
+ * The operation lock is held only around the clean-up + spawn boundary; the
+ * warm-up and probes run outside it so Start/Stop are never blocked for more
+ * than a moment.
+ */
+async function testOneStrategy(
+  batPath: string,
+  signal: AbortSignal,
+  deps: StrategyTesterDeps
+): Promise<StrategyScore | null> {
   // Same fail-closed check startZapretImpl uses. Verified before we touch the
   // running bypass or spawn anything: a tampered strategy must never be
   // executed just because the user pressed "run tests".
-  verifyZapretBundle(zapretBundleDir())
+  deps.verifyBundle(deps.bundleDir())
+  if (signal.aborted) return null
 
-  // Defensive cleanup of any winws.exe still lingering from the previous
-  // iteration — taskkill returns immediately when there's nothing to kill.
-  await killWinws()
-  await sleep(250)
+  // Boundary: kill leftovers and spawn under the lock; release before warm-up.
+  const spawnPromise = deps
+    .withZapretLock(async () => {
+      if (signal.aborted) return null
+      // Defensive cleanup of any winws.exe still lingering from the previous
+      // iteration (and to make the boot probe unambiguous).
+      await deps.killWinws()
+      await abortableSleep(250, signal)
+      if (signal.aborted) return null
+      // Make sure the WinDivert driver is loaded BEFORE winws.exe launches —
+      // the same preflight startZapretImpl uses, otherwise the first .bat in
+      // the sweep tends to fail-load the driver.
+      try {
+        deps.ensureWinDivertReady()
+      } catch {
+        /* best effort */
+      }
+      return deps.spawnStrategy(batPath)
+    })
+    .catch(() => null)
 
-  // Make sure the WinDivert driver is loaded BEFORE winws.exe launches —
-  // exact same preflight startZapretImpl uses, otherwise the first .bat
-  // in the sweep tends to fail-load the driver and skew the report.
-  try { ensureWinDivertReady() } catch { /* best effort */ }
+  // If a user Start/Stop pre-empted us while we were queued for the lock, do
+  // not keep waiting: the queued section above re-checks the signal and no-ops.
+  const child = await Promise.race([spawnPromise, aborted(signal)])
+  if (!child || signal.aborted) {
+    if (child) await deps.killChildTree(child.pid)
+    return null
+  }
 
-  const child = await spawnStrategy(batPath)
+  let preempted = false
   try {
-    const deadline = Date.now() + STRATEGY_BOOT_TIMEOUT_MS
+    const deadline = deps.now() + STRATEGY_BOOT_TIMEOUT_MS
     let booted = false
-    while (Date.now() < deadline) {
-      if (await isWinwsRunning()) { booted = true; break }
-      if (child.exitCode !== null) break
-      await sleep(150)
+    while (deps.now() < deadline) {
+      if (signal.aborted) return null
+      if (await deps.isWinwsRunning()) {
+        booted = true
+        break
+      }
+      if (child.exitCode !== null && child.exitCode !== undefined) break
+      await abortableSleep(150, signal)
     }
-    if (!booted) {
-      return { okCount: 0, totalCount: HTTP_TARGETS.length, score: 0, passed: false }
-    }
+    if (!booted || signal.aborted) return null
 
-    // Extra warmup so winws.exe finishes binding WinDivert filters before
-    // we hit it with traffic. Empirically 4-5s is the minimum; below 3s
-    // and the first strategy in the sweep gets random false negatives.
-    await sleep(STRATEGY_WARMUP_MS)
+    // Extra warmup so winws.exe finishes binding WinDivert filters before we
+    // hit it with traffic. Empirically 4-5s is the minimum.
+    await abortableSleep(STRATEGY_WARMUP_MS, signal)
+    if (signal.aborted) return null
 
-    const results = await probeAll()
+    const results = await deps.probeAll(signal)
+    if (signal.aborted) return null
     const okCount = results.filter((r) => r.ok).length
     const totalCount = results.length
     const score = totalCount === 0 ? 0 : okCount / totalCount
     return { okCount, totalCount, score, passed: score >= PASS_THRESHOLD }
   } finally {
-    await killWinws()
-    await killChildTree(child.pid)
-    await sleep(400)
+    preempted = signal.aborted
+    await deps.killChildTree(child.pid)
+    // When a Start/Stop pre-empted the sweep, the new owner of winws.exe is
+    // responsible for it — killing by image name here would kill their
+    // process. `taskkill /T` above is enough to drop our own tree.
+    if (!preempted) await deps.killWinws()
+    await abortableSleep(400, signal)
   }
 }
 
 /**
- * Run the full strategy test sweep. Holds the zapret start/stop lock for
- * the entire duration so a user toggle waits for us to finish (or queues
- * behind us). Returns the persisted report.
+ * Run the sweep. Resolves with the persisted report; never rejects for a
+ * cancelled run (`cancelled: true` in the report instead).
  */
-export function runStrategyTests(): Promise<StrategyTestReport> {
+export function runStrategyTestsWith(deps: StrategyTesterDeps): Promise<StrategyTestReport> {
   if (runningPromise) return runningPromise
 
-  runningPromise = (async () => {
-    const startedAt = Date.now()
+  const controller = new AbortController()
+  const run: ActiveRun = { controller, reason: null }
+  activeRun = run
+  const { signal } = controller
 
-    // Abort the whole sweep before killing the user's running bypass or
-    // spawning any strategy. Tampered payloads are never executed.
-    verifyZapretBundle(zapretBundleDir())
+  let releaseDone: () => void = () => undefined
+  const stopped = new Promise<void>((resolve) => {
+    releaseDone = resolve
+  })
+  const session = {
+    abort: () => {
+      cancelStrategyTest('preempted')
+    },
+    done: stopped
+  }
+  registerStrategyTestSession(session)
 
-    const strategies = listStrategies()
-    const total = strategies.length
-    if (total === 0) {
-      const empty: StrategyTestReport = {
-        ranAt: startedAt,
-        durationMs: 0,
-        results: {}
-      }
-      saveReport(empty)
-      broadcast('zapret:testProgress', { phase: 'completed', report: empty })
-      return empty
-    }
-
-    const cfg = await getAppConfig().catch(() => null)
-    const wasRunning = getZapretStatus().state === 'running'
-
-    broadcast('zapret:testProgress', {
-      phase: 'starting',
-      total,
-      current: 0
-    })
-
-    const results: Record<string, StrategyTestResult> = {}
-    let bestStrategy: string | undefined
-    let bestScore = -1
-    let testError: Error | null = null
+  const promise = (async (): Promise<StrategyTestReport> => {
+    // Make sure `runningPromise` is assigned before any early return below.
+    await Promise.resolve()
+    const startedAt = deps.now()
 
     try {
-      await withZapretLock(async () => {
-        // User's zapret was running — kill it now (we're inside the lock,
-        // so no concurrent toggle can race). The exit handler in zapret.ts
-        // will null out its global `child` once cmd.exe sees winws die.
-        if (wasRunning) await killWinws()
-        await sleep(500)
+      // Abort the whole sweep before killing the user's running bypass or
+      // spawning any strategy. Tampered payloads are never executed.
+      deps.verifyBundle(deps.bundleDir())
+
+      const strategies = deps.strategies()
+      const total = strategies.length
+      if (total === 0) {
+        const empty: StrategyTestReport = {
+          ranAt: startedAt,
+          durationMs: 0,
+          results: {}
+        }
+        deps.saveReport(empty)
+        deps.broadcast({ phase: 'completed', report: empty })
+        return empty
+      }
+
+      const cfg = await deps.getConfig().catch(() => null)
+      const wasRunning = deps.status().state === 'running'
+
+      deps.broadcast({ phase: 'starting', total, current: 0 })
+
+      const results: Record<string, StrategyTestResult> = {}
+      let bestStrategy: string | undefined
+      let bestScore = -1
+      let testError: Error | null = null
+      const overallDeadline = startedAt + STRATEGY_TEST_DEADLINE_MS
+
+      try {
+        // User's zapret was running — kill it once (short lock) so the first
+        // strategy is not measured on top of an existing filter.
+        if (wasRunning) {
+          await deps.withZapretLock(() => deps.killWinws())
+          await abortableSleep(500, signal)
+        }
 
         for (let i = 0; i < strategies.length; i++) {
+          if (signal.aborted) break
+          if (deps.now() > overallDeadline) {
+            cancelStrategyTest('deadline')
+            break
+          }
           const s = strategies[i]
-          broadcast('zapret:testProgress', {
+          deps.broadcast({
             phase: 'testing',
             current: i + 1,
             total,
             strategy: s.file
           })
-          const batPath = path.join(zapretBundleDir(), s.file)
-          if (!existsSync(batPath)) {
+          const batPath = path.join(deps.bundleDir(), s.file)
+          if (!deps.exists(batPath)) {
             results[s.file] = {
               tested: true,
               passed: false,
@@ -309,13 +483,15 @@ export function runStrategyTests(): Promise<StrategyTestReport> {
             continue
           }
           try {
-            const r = await testOneStrategy(batPath)
+            const r = await testOneStrategy(batPath, signal, deps)
+            if (!r) break
             results[s.file] = { tested: true, ...r }
             if (r.passed && r.score > bestScore) {
               bestScore = r.score
               bestStrategy = s.file
             }
           } catch (e) {
+            if (signal.aborted) break
             console.warn(`[zapret-tester] ${s.file} threw:`, e)
             results[s.file] = {
               tested: true,
@@ -326,46 +502,94 @@ export function runStrategyTests(): Promise<StrategyTestReport> {
             }
           }
         }
-      })
-    } catch (e) {
-      testError = e instanceof Error ? e : new Error(String(e))
-    }
+      } catch (e) {
+        if (!signal.aborted) testError = e instanceof Error ? e : new Error(String(e))
+      }
 
-    const report: StrategyTestReport = {
-      ranAt: startedAt,
-      durationMs: Date.now() - startedAt,
-      bundleVersion: cfg?.zapret?.installedVersion,
-      results,
-      bestStrategy
-    }
-    saveReport(report)
+      // Stop whatever the last strategy left behind. A pre-empting Start/Stop
+      // already owns winws.exe, so only clean up when we still own it.
+      if (signal.aborted && run.reason !== 'preempted') {
+        try {
+          await deps.withZapretLock(() => deps.killWinws())
+        } catch {
+          /* surfaced through status */
+        }
+      }
 
-    // Restore user's zapret if it was running before. Done OUTSIDE the
-    // lock so `startZapret()` can take the lock itself in the normal
-    // way — we already released ours by exiting the withZapretLock body.
-    if (wasRunning) {
-      try { await startZapret() } catch { /* surfaced via status */ }
-    }
+      // Let a pre-empting Start/Stop continue *before* we try to take the
+      // lock again for the restore (otherwise both wait on each other).
+      releaseDone()
 
-    if (testError) {
-      broadcast('zapret:testProgress', {
-        phase: 'error',
-        message: testError.message,
-        report
-      })
-    } else {
-      broadcast('zapret:testProgress', { phase: 'completed', report })
+      const cancelled = signal.aborted
+      const report: StrategyTestReport = {
+        ranAt: startedAt,
+        durationMs: deps.now() - startedAt,
+        bundleVersion: cfg?.zapret?.installedVersion,
+        results,
+        bestStrategy,
+        ...(cancelled ? { cancelled: true } : {})
+      }
+      deps.saveReport(report)
+
+      // Restore the bypass that was running before the sweep — but never
+      // contradict an explicit Start/Stop that pre-empted us, and do nothing
+      // during shutdown.
+      const restore =
+        wasRunning &&
+        (!cancelled || run.reason === 'user' || run.reason === 'deadline')
+      if (restore) {
+        try {
+          await deps.startZapret()
+        } catch {
+          /* surfaced via status */
+        }
+      }
+
+      if (testError) {
+        deps.broadcast({ phase: 'error', message: testError.message, report })
+      } else {
+        deps.broadcast({ phase: 'completed', report })
+      }
+      return report
+    } finally {
+      releaseDone()
+      unregisterStrategyTestSession(session)
+      if (activeRun === run) activeRun = null
+      // No newer sweep can have replaced this one (the entry point reuses the
+      // in-flight promise), so clearing unconditionally is safe.
+      runningPromise = null
     }
-    return report
   })()
 
-  runningPromise.finally(() => {
-    runningPromise = null
-  })
+  runningPromise = promise
+  return promise
+}
 
-  return runningPromise
+/** Real dependencies; tests use `runStrategyTestsWith` with fakes. */
+export function runStrategyTests(): Promise<StrategyTestReport> {
+  return runStrategyTestsWith(defaultDeps())
+}
+
+/**
+ * Abort the sweep in flight. Returns true when something was running.
+ *
+ * The report is still persisted (with `cancelled: true`) and the previous
+ * strategy is restored, so cancelling never leaves the user without a bypass.
+ */
+export function cancelStrategyTest(reason: StrategyTestCancelReason = 'user'): boolean {
+  const run = activeRun
+  if (!run) return false
+  if (!run.reason) run.reason = reason
+  run.controller.abort()
+  return true
 }
 
 export function isStrategyTestRunning(): boolean {
   return runningPromise !== null
 }
+
+// A sweep must never outlive the app: an orphan winws.exe mid-test would leave
+// the user's network in an unknown state.
+app.on('before-quit', () => {
+  cancelStrategyTest('quit')
+})
