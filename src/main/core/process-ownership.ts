@@ -21,6 +21,20 @@ export interface ProcessEntry {
   imagePath: string
 }
 
+/** A process table entry with the start time CIM exposed for it. */
+export interface ProcessIdentity extends ProcessEntry {
+  /** Creation time in Unix milliseconds, when Windows reported one. */
+  creationTime?: number
+}
+
+/**
+ * `startedAt` is recorded with `Date.now()` in the parent, while CIM reports
+ * the child's creation time with a different clock source. Two seconds covers
+ * the spawn latency and rounding without ever accepting a recycled PID that
+ * started in a previous session.
+ */
+export const TRACKED_PID_CREATION_TOLERANCE_MS = 2000
+
 /** One process SkipNet spawned (or adopted as its own child). */
 export interface TrackedProcess {
   pid: number
@@ -151,6 +165,80 @@ export function parseCimProcessList(text: string): ProcessEntry[] {
     out.push({ pid, imagePath })
   }
   return out
+}
+
+/**
+ * Parse `pid|executablePath|creationTimeMs` lines produced by the identity
+ * query in `process-kill.ts`. The third field is optional: a Windows build that
+ * cannot expose the creation time still yields a usable path-only identity.
+ */
+export function parseCimProcessIdentity(text: string): ProcessIdentity[] {
+  const out: ProcessIdentity[] = []
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim()
+    if (!line) continue
+    const first = line.indexOf('|')
+    if (first <= 0) continue
+    const pid = Number.parseInt(line.slice(0, first), 10)
+    if (!Number.isInteger(pid) || pid <= 0) continue
+
+    const rest = line.slice(first + 1)
+    const second = rest.lastIndexOf('|')
+    const imagePath = (second >= 0 ? rest.slice(0, second) : rest).trim()
+    if (!imagePath) continue
+
+    const parsedTime = second >= 0 ? Number.parseInt(rest.slice(second + 1).trim(), 10) : NaN
+    const entry: ProcessIdentity = { pid, imagePath }
+    if (Number.isFinite(parsedTime) && parsedTime > 0) entry.creationTime = parsedTime
+    out.push(entry)
+  }
+  return out
+}
+
+/** Case/separator-insensitive equality of two absolute Windows paths. */
+export function isSameImagePath(candidate: string, recorded: string): boolean {
+  if (typeof candidate !== 'string' || typeof recorded !== 'string') return false
+  const left = candidate.trim()
+  const right = recorded.trim()
+  if (!left || !right) return false
+  if (hasParentSegment(left) || hasParentSegment(right)) return false
+  return normalizeForCompare(path.resolve(left)) === normalizeForCompare(path.resolve(right))
+}
+
+/**
+ * R-12: may a tracked PID still be killed?
+ *
+ * The tracker remembers what *we* spawned, but Windows recycles PIDs. Before a
+ * stop/quit tears a process down, the live process must still (a) exist under
+ * the same PID, (b) execute from a SkipNet-owned directory **or** be the exact
+ * image path recorded at spawn (the Zapret launcher is `cmd.exe`, a system
+ * binary outside our resources tree), and (c) — when both the tracker and CIM
+ * have a start time — have started within two seconds of that recorded spawn.
+ * Anything else is treated as "not ours" and left alive.
+ */
+export function isTrackedProcessMatch(
+  tracked: TrackedProcess,
+  actual: ProcessIdentity | undefined,
+  roots: readonly string[]
+): boolean {
+  if (!tracked || !actual) return false
+  if (actual.pid !== tracked.pid) return false
+  const sameImage =
+    isOwnedImagePath(actual.imagePath, roots) ||
+    isSameImagePath(actual.imagePath, tracked.imagePath)
+  if (!sameImage) return false
+  if (
+    typeof actual.creationTime === 'number' &&
+    typeof tracked.startedAt === 'number' &&
+    Number.isFinite(actual.creationTime) &&
+    Number.isFinite(tracked.startedAt) &&
+    tracked.startedAt > 0
+  ) {
+    if (Math.abs(actual.creationTime - tracked.startedAt) > TRACKED_PID_CREATION_TOLERANCE_MS) {
+      return false
+    }
+  }
+  return true
 }
 
 /**

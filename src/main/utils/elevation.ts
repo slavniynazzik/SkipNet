@@ -1,9 +1,25 @@
-import { execFile } from 'child_process'
-import { promisify } from 'util'
+/**
+ * Startup elevation probe.
+ *
+ * Every spawn resolves through `sysBin()`: a bare `fltmc.exe` / `net.exe`
+ * would be looked up in the current working directory first, and that
+ * directory can be user-writable for a portable copy or a shortcut's "Start
+ * in" (L2). The probe itself runs before any window exists, so a planted
+ * utility next to the exe would otherwise execute elevated.
+ */
+
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
+import { sysBin } from './sys-bin'
 
 const execFilePromise = promisify(execFile)
 
 let isAdminCached: boolean | null = null
+
+/** Reset the memoised verdict (test seam and future profile switches). */
+export function resetElevationCacheForTesting(): void {
+  isAdminCached = null
+}
 
 export async function isRunningAsAdmin(): Promise<boolean> {
   if (isAdminCached !== null) {
@@ -16,7 +32,7 @@ export async function isRunningAsAdmin(): Promise<boolean> {
   // even for administrators, which used to make SkipNet quit with a bogus
   // "run as administrator" error.
   try {
-    await execFilePromise('fltmc.exe', ['filters'], {
+    await execFilePromise(sysBin('fltmc.exe'), ['filters'], {
       timeout: 3000,
       windowsHide: true
     })
@@ -33,7 +49,7 @@ export async function isRunningAsAdmin(): Promise<boolean> {
   }
 
   try {
-    await execFilePromise('net', ['session'], { timeout: 2000, windowsHide: true })
+    await execFilePromise(sysBin('net.exe'), ['session'], { timeout: 2000, windowsHide: true })
     isAdminCached = true
     return true
   } catch {
@@ -41,4 +57,3 @@ export async function isRunningAsAdmin(): Promise<boolean> {
     return false
   }
 }
-

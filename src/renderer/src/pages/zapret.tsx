@@ -403,9 +403,8 @@ const Zapret: React.FC = () => {
         <CardContent className="space-y-2">
           {strategies.length === 0 && (
             <p className="text-sm text-muted-foreground">
-              Сборка Zapret не найдена. Скопируйте содержимое{' '}
-              <code className="text-xs">Flowseal/zapret-discord-youtube</code> в{' '}
-              <code className="text-xs">%APPDATA%\skipnet\runtime\zapret</code> или встроенную папку{' '}
+              Сборка Zapret не найдена. Переустановите SkipNet или нажмите «Обновить»
+              в баннере обновления выше — стратегии поставляются во встроенной папке{' '}
               <code className="text-xs">resources\zapret</code>.
             </p>
           )}

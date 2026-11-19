@@ -1,13 +1,24 @@
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  utimesSync,
+  writeFileSync
+} from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import {
+  STAGING_SWEEP_MAX_AGE_MS,
+  isStaleStagingEntry,
   productionStagingRoot,
   secureStagingDir,
   setStagingRootForTesting,
   stagingAclArgs,
-  stagingPath
+  stagingPath,
+  sweepStaleStagingFiles
 } from '@main/utils/secure-staging'
 
 let root: string
@@ -73,6 +84,44 @@ describe('stagingAclArgs', () => {
     expect(args).toContain('*S-1-5-32-544:(OI)(CI)F')
     // Locale-independent: no localized group names such as "Администраторы".
     expect(args.join(' ')).not.toMatch(/Administrators|Администратор/i)
+  })
+})
+
+describe('staging sweep (startup)', () => {
+  const now = 1_700_000_000_000
+
+  it('treats only finite timestamps older than seven days as stale', () => {
+    expect(isStaleStagingEntry(now - STAGING_SWEEP_MAX_AGE_MS - 1, now)).toBe(true)
+    expect(isStaleStagingEntry(now - STAGING_SWEEP_MAX_AGE_MS + 1, now)).toBe(false)
+    expect(isStaleStagingEntry(Number.NaN, now)).toBe(false)
+    expect(isStaleStagingEntry(0, Number.NaN)).toBe(false)
+  })
+
+  it('removes old files from the updates staging directory only', () => {
+    const updates = secureStagingDir('updates')
+    const oldInstaller = path.join(updates, 'SkipNet-update-old.exe')
+    const freshInstaller = path.join(updates, 'SkipNet-update-new.exe')
+    writeFileSync(oldInstaller, 'old')
+    writeFileSync(freshInstaller, 'new')
+    const oldSeconds = (now - STAGING_SWEEP_MAX_AGE_MS - 60_000) / 1000
+    utimesSync(oldInstaller, oldSeconds, oldSeconds)
+
+    expect(sweepStaleStagingFiles('updates', now)).toBe(1)
+    expect(existsSync(oldInstaller)).toBe(false)
+    expect(existsSync(freshInstaller)).toBe(true)
+
+    // A different kind is never touched by the updates sweep.
+    const tasks = secureStagingDir('tasks')
+    const task = path.join(tasks, 'telegram-old.xml')
+    writeFileSync(task, '<Task />')
+    utimesSync(task, oldSeconds, oldSeconds)
+    expect(sweepStaleStagingFiles('updates', now)).toBe(0)
+    expect(existsSync(task)).toBe(true)
+  })
+
+  it('is a no-op when the directory does not exist', () => {
+    setStagingRootForTesting(path.join(root, 'missing-root'))
+    expect(sweepStaleStagingFiles('updates', now)).toBe(0)
   })
 })
 

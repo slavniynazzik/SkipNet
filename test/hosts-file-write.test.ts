@@ -1,8 +1,23 @@
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  utimesSync,
+  writeFileSync
+} from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { buildElevatedHostsWriteScript, writeHostsContentTo } from '@main/core/hosts-file'
+import {
+  HOSTS_TEMP_MAX_AGE_MS,
+  buildElevatedHostsWriteScript,
+  isStaleHostsTempFile,
+  resetHostsTempSweepForTesting,
+  sweepStaleHostsTemps,
+  writeHostsContentTo
+} from '@main/core/hosts-file'
 
 const tempDirs: string[] = []
 
@@ -43,6 +58,47 @@ describe('buildElevatedHostsWriteScript', () => {
     expect(script).toContain("Write-Error 'hosts checksum mismatch'")
     expect(script.match(/exit 1/g)?.length).toBeGreaterThanOrEqual(2)
     expect(script).toContain('exit 0')
+  })
+})
+
+describe('stale hosts temp sweep (W15)', () => {
+  const now = 1_700_000_000_000
+  const name = 'hosts.skipnet-0123456789abcdef.tmp'
+
+  it('accepts only SkipNet temp files inside the hosts directory', () => {
+    const dir = tempDir()
+    const old = now - HOSTS_TEMP_MAX_AGE_MS - 1
+
+    expect(isStaleHostsTempFile(path.join(dir, name), dir, old, now)).toBe(true)
+    // Fresh temp files may belong to a write that is still running.
+    expect(isStaleHostsTempFile(path.join(dir, name), dir, now - 1000, now)).toBe(false)
+    // Different directory, different name, invalid mtime.
+    expect(
+      isStaleHostsTempFile(path.join(tempDir(), name), dir, old, now)
+    ).toBe(false)
+    expect(isStaleHostsTempFile(path.join(dir, 'hosts'), dir, old, now)).toBe(false)
+    expect(isStaleHostsTempFile(path.join(dir, 'hosts.skipnet-x.tmp.bak'), dir, old, now)).toBe(
+      false
+    )
+    expect(isStaleHostsTempFile(path.join(dir, name), dir, Number.NaN, now)).toBe(false)
+  })
+
+  it('removes old temp files once and keeps fresh ones', () => {
+    const dir = tempDir()
+    const stale = path.join(dir, 'hosts.skipnet-aaaaaaaa.tmp')
+    const fresh = path.join(dir, 'hosts.skipnet-bbbbbbbb.tmp')
+    writeFileSync(stale, 'old')
+    writeFileSync(fresh, 'new')
+    const oldSeconds = (now - HOSTS_TEMP_MAX_AGE_MS - 60_000) / 1000
+    utimesSync(stale, oldSeconds, oldSeconds)
+
+    resetHostsTempSweepForTesting()
+    expect(sweepStaleHostsTemps(dir, now)).toBe(1)
+    expect(existsSync(stale)).toBe(false)
+    expect(existsSync(fresh)).toBe(true)
+
+    // The sweep is once per session.
+    expect(sweepStaleHostsTemps(dir, now)).toBe(0)
   })
 })
 

@@ -32,13 +32,27 @@
   ; package.json, and users must be able to tell installed builds apart in
   ; Programs & Features. Only the URL columns are removed.
 
+  ; --- Resource ACL ----------------------------------------------------------
+  ; The app ships an embedded manifest and verifies its own binaries, but a
+  ; manifest is only meaningful if the files it names cannot be replaced by a
+  ; medium-integrity process. The assisted installer lets the user pick a
+  ; writable directory, so enforce the same admin-only ACL the app relies on:
+  ; Administrators + SYSTEM full, built-in Users read+execute. SIDs are used
+  ; so the command works on every Windows locale. A failure is logged but does
+  ; not abort the install (the app still verifies hashes at runtime).
+  nsExec::ExecToLog '"$SYSDIR\icacls.exe" "$INSTDIR\resources" /inheritance:r /grant:r *S-1-5-32-544:(OI)(CI)F *S-1-5-18:(OI)(CI)F *S-1-5-32-545:(OI)(CI)RX'
+  Pop $0
+  ${If} $0 != 0
+    DetailPrint "SkipNet: failed to tighten the resources ACL (icacls exit $0)"
+  ${EndIf}
+
   ; --- Pre-rebrand cleanup ---------------------------------------------------
   ; SkipNet may be installed over an older Slipgate build. Remove the old
   ; login tasks and protocol handler so autostart and `slipgate://` links can
   ; never launch a stale binary. The files of the old install are left to its
   ; own uninstaller; we only clear the shared system registrations.
-  nsExec::ExecToLog 'schtasks /delete /tn "Slipgate Auto Start" /f'
-  nsExec::ExecToLog 'schtasks /delete /tn "SlipgateAutoStart" /f'
+  nsExec::ExecToLog '"$SYSDIR\schtasks.exe" /delete /tn "Slipgate Auto Start" /f'
+  nsExec::ExecToLog '"$SYSDIR\schtasks.exe" /delete /tn "SlipgateAutoStart" /f'
   DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "Slipgate"
   DeleteRegValue HKLM "Software\Microsoft\Windows\CurrentVersion\Run" "Slipgate"
   DeleteRegKey HKCR "slipgate"
@@ -76,19 +90,30 @@
   IfFileExists "$INSTDIR\.skipnet-upgrade" skipnet_skip_wipe 0
   IfFileExists "$INSTDIR\.slipgate-upgrade" skipnet_skip_wipe 0
 
-  ; 1. Stop any running SkipNet / Slipgate / Zapret / proxy processes that
-  ;    could keep files locked. /F = force, /T = include child processes.
-  nsExec::ExecToLog 'taskkill /F /IM SkipNet.exe /T'
-  nsExec::ExecToLog 'taskkill /F /IM Slipgate.exe /T'
-  nsExec::ExecToLog 'taskkill /F /IM TgWsProxy_windows.exe /T'
-  nsExec::ExecToLog 'taskkill /F /IM winws.exe /T'
-  nsExec::ExecToLog 'taskkill /F /IM elevate.exe /T'
+  ; 1. Stop this app (and the pre-rebrand binary name) so it releases its
+  ;    files. /F = force, /T = include child processes. Do NOT kill
+  ;    winws.exe / TgWsProxy_windows.exe / elevate.exe by image name: those
+  ;    names are shared with other Zapret/TgWs installs and a stranger's
+  ;    process would be destroyed. The app stops its own children on quit.
+  nsExec::ExecToLog '"$SYSDIR\taskkill.exe" /F /IM SkipNet.exe /T'
+  nsExec::ExecToLog '"$SYSDIR\taskkill.exe" /F /IM Slipgate.exe /T'
   Sleep 500
 
+  ; 1b. Remove SkipNet's blocks from the hosts file while the cleanup script is
+  ;     still on disk and the app can no longer rewrite them. This must run
+  ;     before electron-builder deletes $INSTDIR. A failure is logged and
+  ;     ignored: a stale block is annoying, an aborted uninstall is worse, and
+  ;     the backup next to `hosts` is the recovery path.
+  nsExec::ExecToLog '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\resources\uninstall-hosts-cleanup.ps1"'
+  Pop $0
+  ${If} $0 != 0
+    DetailPrint "SkipNet: hosts cleanup script failed or was unavailable (exit $0) — continuing"
+  ${EndIf}
+
   ; 2. Remove any auto-start Scheduled Tasks, current and pre-rebrand names.
-  nsExec::ExecToLog 'schtasks /delete /tn "SkipNetAutoStart" /f'
-  nsExec::ExecToLog 'schtasks /delete /tn "Slipgate Auto Start" /f'
-  nsExec::ExecToLog 'schtasks /delete /tn "SlipgateAutoStart" /f'
+  nsExec::ExecToLog '"$SYSDIR\schtasks.exe" /delete /tn "SkipNetAutoStart" /f'
+  nsExec::ExecToLog '"$SYSDIR\schtasks.exe" /delete /tn "Slipgate Auto Start" /f'
+  nsExec::ExecToLog '"$SYSDIR\schtasks.exe" /delete /tn "SlipgateAutoStart" /f'
 
   ; 3. Remove run-on-login Registry keys (alternative auto-start mechanism).
   DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "SkipNet"
@@ -147,12 +172,12 @@
   ;    these exact WinDivert service names, its registration is removed too;
   ;    the shared driver files are not touched. `sc` service lookup is
   ;    case-insensitive, so WinDivert / windivert need one entry only.
-  nsExec::ExecToLog 'sc stop WinDivert'
-  nsExec::ExecToLog 'sc stop WinDivert14'
-  nsExec::ExecToLog 'sc stop WinDivert64'
-  nsExec::ExecToLog 'sc delete WinDivert'
-  nsExec::ExecToLog 'sc delete WinDivert14'
-  nsExec::ExecToLog 'sc delete WinDivert64'
+  nsExec::ExecToLog '"$SYSDIR\sc.exe" stop WinDivert'
+  nsExec::ExecToLog '"$SYSDIR\sc.exe" stop WinDivert14'
+  nsExec::ExecToLog '"$SYSDIR\sc.exe" stop WinDivert64'
+  nsExec::ExecToLog '"$SYSDIR\sc.exe" delete WinDivert'
+  nsExec::ExecToLog '"$SYSDIR\sc.exe" delete WinDivert14'
+  nsExec::ExecToLog '"$SYSDIR\sc.exe" delete WinDivert64'
 
   ; NOTE: the install directory is removed by electron-builder's own
   ; uninstaller *after* this macro returns. Do not `RMDir /r "$INSTDIR"`

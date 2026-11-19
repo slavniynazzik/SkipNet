@@ -773,6 +773,17 @@ export function runZapretTests(): RunTestsResult {
 
 // ---- Discord cache cleanup ------------------------------------------------
 
+/**
+ * Containment check for destructive deletes (R-10): `target` must be a strict
+ * descendant of `root`. A sibling such as `C:\Users\me\AppData\Roaming-evil`
+ * only shares the string prefix, so the separator is part of the comparison.
+ */
+export function isInsideDirectory(target: string, root: string): boolean {
+  if (typeof target !== 'string' || typeof root !== 'string') return false
+  if (!target.trim() || !root.trim()) return false
+  return path.resolve(target).startsWith(path.resolve(root) + path.sep)
+}
+
 export interface DiscordCacheResult {
   ok: boolean
   message: string
@@ -828,6 +839,18 @@ export function clearDiscordCache(options: DiagFixOptions = {}): DiscordCacheRes
       result.closed.push(target.exe)
     }
     for (const dir of target.dirs) {
+      const appData = process.env.APPDATA
+      if (!appData || !isInsideDirectory(dir.absolute, appData)) {
+        // The preview built these paths from %APPDATA%, so this should never
+        // fire. If it does (env changed, future refactor), deleting outside
+        // the roaming profile is not recoverable — refuse loudly.
+        result.failed.push(dir.relative)
+        appLog(
+          'warn',
+          `zapret diagnostics: refused to delete Discord cache outside %APPDATA%: ${dir.absolute}`
+        )
+        continue
+      }
       try {
         rmSync(dir.absolute, { recursive: true, force: true })
         result.cleared.push(dir.relative)

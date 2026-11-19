@@ -573,8 +573,14 @@ async function applyCandidate(
 
   const written = writeHostsContent(nextContent)
   if (!written.ok) {
-    // A failed direct write can leave the system file truncated before the
-    // elevated fallback runs. Always put the original bytes back.
+    // UAC was dismissed before the elevated copy ever ran: nothing touched the
+    // file, so a rollback write would only pop a *second* consent prompt for a
+    // no-op. Real failures (truncated direct write, elevated script error) are
+    // still rolled back from the bytes read at the start of the operation.
+    if (written.reason === 'uac-cancelled') {
+      await restoreState()
+      throw new Error(`Не удалось записать файл hosts: ${written.error ?? 'неизвестная ошибка'}.`)
+    }
     const rollback = writeHostsContent(original)
     await restoreState()
     throw new Error(
@@ -1174,25 +1180,9 @@ export async function restoreLatestHostsBackup(): Promise<HostsOperationResult> 
 
     // Make the restore itself undoable: keep the file that is about to be
     // replaced as the newest backup.
-    const currentState = loadHostsState(catalog)
-    createBackup(current, currentState)
+    const previousState = loadHostsState(catalog)
+    createBackup(current, previousState)
 
-    const written = writeHostsContent(backup.content)
-    if (!written.ok) {
-      const rollback = writeHostsContent(current)
-      throw new Error(
-        `Не удалось восстановить hosts: ${written.error ?? 'неизвестная ошибка'}.` +
-          (rollback.ok ? ' Текущий файл сохранён.' : '')
-      )
-    }
-    const verify = readHostsRawStrict()
-    if (verify !== backup.content) {
-      const rollback = writeHostsContent(current)
-      throw new Error(
-        'Файл hosts восстановлен не полностью.' +
-          (rollback.ok ? ' Текущий файл сохранён.' : ' Автоматический откат не удался.')
-      )
-    }
     // Always rebuild the selection from the restored file. The sidecar state
     // is only a hint (default profile), because backups made by older builds
     // stored the *new* selection next to the *old* file.
@@ -1226,7 +1216,43 @@ export async function restoreLatestHostsBackup(): Promise<HostsOperationResult> 
       appliedAt: new Date().toISOString(),
       renderedHash: hashHostsContent(backup.content)
     }
+
+    // Persist before writing, mirroring `applyCandidate`: if the write fails
+    // the UI must not advertise a restored selection for a file that was never
+    // replaced. A rollback of the write also rolls the state back.
     await saveHostsState(state)
+    const restoreState = async (): Promise<void> => {
+      try {
+        await saveHostsState(previousState)
+      } catch {
+        /* the hosts rollback below is what the user actually sees */
+      }
+    }
+
+    const written = writeHostsContent(backup.content)
+    if (!written.ok) {
+      if (written.reason !== 'uac-cancelled') {
+        const rollback = writeHostsContent(current)
+        await restoreState()
+        throw new Error(
+          `Не удалось восстановить hosts: ${written.error ?? 'неизвестная ошибка'}.` +
+            (rollback.ok ? ' Текущий файл сохранён.' : '')
+        )
+      }
+      await restoreState()
+      throw new Error(
+        `Не удалось восстановить hosts: ${written.error ?? 'неизвестная ошибка'}.`
+      )
+    }
+    const verify = readHostsRawStrict()
+    if (verify !== backup.content) {
+      const rollback = writeHostsContent(current)
+      await restoreState()
+      throw new Error(
+        'Файл hosts восстановлен не полностью.' +
+          (rollback.ok ? ' Текущий файл сохранён.' : ' Автоматический откат не удался.')
+      )
+    }
     const outcome: ApplyOutcome = {
       state,
       content: backup.content,

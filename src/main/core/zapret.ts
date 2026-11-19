@@ -7,7 +7,7 @@ import { zapretBundleDir } from '../utils/dirs'
 import { sysBin } from '../utils/sys-bin'
 import { hasReplacementChar, sameServiceImagePath } from '../utils/service-path'
 import {
-  enumerateOwnedProcesses,
+  enumerateOwnedProcessIdentities,
   isProcessAlive,
   killOwnedComponent
 } from './process-kill'
@@ -335,8 +335,12 @@ export function killWinws(): Promise<void> {
  */
 async function adoptOwnedWinwsPid(): Promise<number | null> {
   try {
-    const owned = await enumerateOwnedProcesses(['winws.exe'])
-    for (const entry of owned) trackProcess(entry.pid, entry.imagePath, 'zapret')
+    const owned = await enumerateOwnedProcessIdentities(['winws.exe'])
+    for (const entry of owned) {
+      // Record the real creation time (not the adoption moment) so R-12 can
+      // prove this PID is still the same process when a stop arrives.
+      trackProcess(entry.pid, entry.imagePath, 'zapret', entry.creationTime ?? Date.now())
+    }
     return owned[0]?.pid ?? null
   } catch {
     return null

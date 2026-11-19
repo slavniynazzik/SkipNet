@@ -1,13 +1,15 @@
 ﻿import {
   appConfigPath,
   dataDir,
+  isPortable,
   logDir,
   runtimeDir,
   themesDir
 } from './dirs'
 import { defaultConfig } from './template'
 import { stringifyYaml } from './yaml'
-import { initAppLog } from './app-logger'
+import { appLog, initAppLog } from './app-logger'
+import { sweepStaleStagingFiles } from './secure-staging'
 import { mkdir, writeFile, copyFile, rename, unlink } from 'fs/promises'
 import { randomUUID } from 'crypto'
 import { existsSync } from 'fs'
@@ -120,5 +122,31 @@ export async function init(): Promise<void> {
   await initConfig()
   // Prune day files beyond `maxLogDays` before the first line is written.
   await initAppLog()
+
+  // Portable builds keep `resources/` next to the exe, which the same user can
+  // write to. The embedded manifest still catches tampering at runtime, but it
+  // cannot distinguish an attacker from the user who owns the directory. Make
+  // the trust boundary explicit in the log instead of implying Program Files
+  // protection that does not exist (W5).
+  if (isPortable()) {
+    appLog(
+      'warn',
+      'Портативная сборка: каталог resources доступен на запись текущему пользователю. ' +
+        'Манифест целостности обнаруживает подмену файлов, но не защищает от того же ' +
+        'пользователя — распаковывайте архив только из доверенного источника.'
+    )
+  }
+
+  // Installers/task XML that never ran accumulate in the admin-only
+  // `%ProgramData%\SkipNet\updates`. Best-effort cleanup after seven days.
+  try {
+    const removed = sweepStaleStagingFiles('updates')
+    if (removed > 0) {
+      appLog('info', `Очищено устаревших файлов обновлений: ${removed}`)
+    }
+  } catch {
+    /* best effort — a locked directory must never block startup */
+  }
+
   initDeeplink()
 }

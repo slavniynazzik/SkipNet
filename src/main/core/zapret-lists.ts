@@ -26,6 +26,7 @@ import {
 } from 'node:fs'
 import path from 'node:path'
 import { zapretBundleDir } from '../utils/dirs'
+import { devEnv } from '../utils/dev-env'
 import { fetchGithub } from '../utils/github'
 import { getAppConfig, patchAppConfig } from '../config'
 import { isValidCidrEntry, isValidListEntry, normalizeListContent } from './zapret-list-lines'
@@ -34,9 +35,11 @@ const DEFAULT_UPSTREAM_BASE =
   'https://raw.githubusercontent.com/Flowseal/zapret-discord-youtube/refs/heads/main'
 
 // Kept overridable so a local mock server can exercise the full download
-// → validate → write path without hitting GitHub.
-function upstreamBase(): string {
-  const override = process.env.SKIPNET_ZAPRET_LISTS_BASE?.trim()
+// → validate → write path without hitting GitHub. `devEnv` ignores the
+// variable in a packaged build: otherwise any same-user process could point a
+// privileged list update at a malicious mirror.
+export function upstreamBase(): string {
+  const override = devEnv('SKIPNET_ZAPRET_LISTS_BASE')
   return (override || DEFAULT_UPSTREAM_BASE).replace(/\/+$/, '')
 }
 

@@ -14,6 +14,7 @@ import { randomUUID } from 'node:crypto'
 import { isIP } from 'node:net'
 import path from 'node:path'
 import { dataDir, resourcesDir } from '../utils/dirs'
+import { devEnv } from '../utils/dev-env'
 import { fetchGithub } from '../utils/github'
 import { compareVersion } from '../../shared/version'
 
@@ -307,6 +308,16 @@ function assertRemoteOnlyUpdatesKnownHostnames(
   }
 }
 
+/**
+ * Remote catalog endpoint. The `SKIPNET_HOSTS_CATALOG_URL` seam exists only
+ * for the dev/mock-server suite: a packaged build must ignore it, because any
+ * process running as the same user can set it before launching SkipNet and
+ * point a privileged hosts catalog at an attacker-controlled mirror.
+ */
+export function hostsCatalogRemoteUrl(): string {
+  return devEnv('SKIPNET_HOSTS_CATALOG_URL') || DEFAULT_REMOTE_URL
+}
+
 export function bundledCatalogPath(): string {
   return path.join(resourcesDir(), CATALOG_FILE)
 }
@@ -370,7 +381,7 @@ export function getDnsProfileName(catalog: HostsCatalog, id: string): string {
  * data. The file is validated before it is written to userData.
  */
 export async function updateHostsCatalog(): Promise<HostsCatalogUpdateResult> {
-  const url = process.env.SKIPNET_HOSTS_CATALOG_URL?.trim() || DEFAULT_REMOTE_URL
+  const url = hostsCatalogRemoteUrl()
   const res = await fetchGithub(url, {
     headers: {
       'User-Agent': 'SkipNet-HostsCatalog',

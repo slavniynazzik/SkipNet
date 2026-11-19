@@ -8,23 +8,57 @@ const PORTABLE_MARKER = 'PORTABLE'
 /** NSIS uninstaller written next to the exe by the installed build. */
 const UNINSTALLER_NAMES = ['Uninstall SkipNet.exe', 'uninstall.exe']
 
+/** Normalise a Windows path for a case/separator-insensitive prefix check. */
+function normalizeWindowsPath(value: string): string {
+  return path.win32.resolve(value).replace(/[\\/]+$/, '').toLowerCase()
+}
+
+/**
+ * True when `dir` is `%ProgramFiles%`, `%ProgramFiles(x86)%` or inside them.
+ *
+ * Uses the environment variables instead of the literal English folder names
+ * so a localised Windows install is covered too. `path.win32` keeps the check
+ * meaningful even when the unit suite runs on a non-Windows host.
+ */
+export function isUnderProgramFiles(
+  dir: string,
+  env: NodeJS.ProcessEnv = process.env
+): boolean {
+  if (typeof dir !== 'string' || !dir.trim()) return false
+  const target = normalizeWindowsPath(dir)
+  const roots = ['ProgramFiles', 'ProgramW6432', 'ProgramFiles(x86)']
+    .map((name) => env[name])
+    .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+
+  return roots.some((root) => {
+    const base = normalizeWindowsPath(root)
+    if (!base) return false
+    return target === base || target.startsWith(`${base}\\`)
+  })
+}
+
 /**
  * Detect a portable (unpacked 7z) build from its directory.
  *
  * A portable copy is either explicitly marked with a `PORTABLE` file or — the
  * normal case, because `electron-builder`'s 7z target does not add one — simply
- * lacks the NSIS uninstaller that every installed build has. The installed
- * build must never create a marker: its data lives in `%APPDATA%\skipnet`, and
- * a stray marker would silently move it next to Program Files.
+ * lacks the NSIS uninstaller that every installed build has. A copy whose
+ * uninstaller is missing but which sits in Program Files is an *installed*
+ * build with a damaged directory: treating it as portable would move the
+ * profile (and the trusted updater/state) next to the binaries, so Program
+ * Files always wins over the "no uninstaller" heuristic (W10).
  *
  * `exists` is injectable so the decision can be unit-tested with temp dirs.
  */
 export function detectPortableDir(
   dir: string,
-  exists: (candidate: string) => boolean = existsSync
+  exists: (candidate: string) => boolean = existsSync,
+  env: NodeJS.ProcessEnv = process.env
 ): boolean {
   if (exists(path.join(dir, PORTABLE_MARKER))) return true
-  return !UNINSTALLER_NAMES.some((name) => exists(path.join(dir, name)))
+  const hasUninstaller = UNINSTALLER_NAMES.some((name) => exists(path.join(dir, name)))
+  if (hasUninstaller) return false
+  return !isUnderProgramFiles(dir, env)
 }
 
 export function isPortable(): boolean {

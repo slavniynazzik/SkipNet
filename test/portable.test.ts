@@ -41,4 +41,21 @@ describe('detectPortableDir', () => {
     // This is exactly what the 7z target produces: no marker, no uninstaller.
     expect(detectPortableDir(tempDir())).toBe(true)
   })
+
+  it('stays non-portable in Program Files even when the uninstaller is gone', () => {
+    // A damaged/partial install must not silently switch to a profile next to
+    // the binaries. Program Files always wins over the "no uninstaller" guess.
+    const env = {
+      ProgramFiles: 'C:\\Program Files',
+      ProgramW6432: 'C:\\Program Files',
+      'ProgramFiles(x86)': 'C:\\Program Files (x86)'
+    }
+    const missing = (): boolean => false
+
+    expect(detectPortableDir('C:\\Program Files\\SkipNet', missing, env)).toBe(false)
+    expect(detectPortableDir('c:\\program files\\skipnet', missing, env)).toBe(false)
+    expect(detectPortableDir('C:\\Program Files (x86)\\SkipNet', missing, env)).toBe(false)
+    // A sibling that only shares the text prefix is not under Program Files.
+    expect(detectPortableDir('C:\\Program Files-evil\\SkipNet', missing, env)).toBe(true)
+  })
 })

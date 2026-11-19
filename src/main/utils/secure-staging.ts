@@ -12,7 +12,7 @@
  * gets an error. There is no silent fallback to `%TEMP%`.
  */
 import { spawnSync } from 'node:child_process'
-import { mkdirSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, statSync, unlinkSync } from 'node:fs'
 import path from 'node:path'
 import { app } from 'electron'
 import { is } from '@electron-toolkit/utils'
@@ -143,6 +143,68 @@ function tightenAcl(dir: string, label: string): void {
     `Не удалось ограничить доступ к каталогу ${label}: ${aclErrorDetail(result)}. ` +
       'Запустите SkipNet от имени администратора и повторите попытку.'
   )
+}
+
+/** Staged installers/task XML older than this are leftovers from a crash. */
+export const STAGING_SWEEP_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000
+
+/**
+ * Pure age predicate for the startup staging sweep. Invalid timestamps and
+ * non-finite clocks are never "stale": the sweep must not delete a file just
+ * because its metadata could not be read.
+ */
+export function isStaleStagingEntry(
+  mtimeMs: number,
+  now: number = Date.now(),
+  maxAgeMs: number = STAGING_SWEEP_MAX_AGE_MS
+): boolean {
+  if (!Number.isFinite(mtimeMs) || !Number.isFinite(now)) return false
+  return now - mtimeMs > maxAgeMs
+}
+
+/**
+ * Best-effort startup cleanup of `%ProgramData%\SkipNet\<kind>`.
+ *
+ * The directory is admin-only (see `secureStagingDir`), so only SkipNet itself
+ * can have written there. Downloads/installers that never ran (crash, aborted
+ * UAC, failed spawn) would otherwise accumulate forever. Directories are left
+ * untouched; only plain files older than seven days are removed.
+ */
+export function sweepStaleStagingFiles(
+  kind: StagingKind = 'updates',
+  now: number = Date.now()
+): number {
+  let dir: string
+  try {
+    dir = stagingPath(kind)
+  } catch {
+    return 0
+  }
+  if (!existsSync(dir)) return 0
+
+  let removed = 0
+  try {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (!entry.isFile()) continue
+      const file = path.join(dir, entry.name)
+      let mtimeMs: number
+      try {
+        mtimeMs = statSync(file).mtimeMs
+      } catch {
+        continue
+      }
+      if (!isStaleStagingEntry(mtimeMs, now)) continue
+      try {
+        unlinkSync(file)
+        removed++
+      } catch {
+        /* locked by AV/indexer — retried on the next launch */
+      }
+    }
+  } catch {
+    /* unreadable staging dir: nothing to sweep */
+  }
+  return removed
 }
 
 /**

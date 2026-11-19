@@ -8,13 +8,24 @@
 
 import { createHash } from 'node:crypto'
 import { isIP } from 'node:net'
+import {
+  HOSTS_ADOBE_BLOCK_END,
+  HOSTS_ADOBE_BLOCK_START,
+  HOSTS_EDITOR_BLOCK_END,
+  HOSTS_EDITOR_BLOCK_START,
+  HOSTS_LEGACY_BLOCK_END,
+  HOSTS_LEGACY_BLOCK_START
+} from '../../shared/hosts-markers'
 
-export const EDITOR_BLOCK_START = '# --- SkipNet hosts editor BEGIN ---'
-export const EDITOR_BLOCK_END = '# --- SkipNet hosts editor END ---'
-export const LEGACY_SKIPNET_START = '# --- SkipNet (Zapret) hosts BEGIN ---'
-export const LEGACY_SKIPNET_END = '# --- SkipNet (Zapret) hosts END ---'
-export const ADOBE_BLOCK_START = '# --- SkipNet Adobe activation block BEGIN ---'
-export const ADOBE_BLOCK_END = '# --- SkipNet Adobe activation block END ---'
+// Re-exported under the historical names so every existing caller keeps a
+// stable import. The canonical strings live in `src/shared/hosts-markers.ts`,
+// which the uninstaller script and its test also read.
+export const EDITOR_BLOCK_START = HOSTS_EDITOR_BLOCK_START
+export const EDITOR_BLOCK_END = HOSTS_EDITOR_BLOCK_END
+export const LEGACY_SKIPNET_START = HOSTS_LEGACY_BLOCK_START
+export const LEGACY_SKIPNET_END = HOSTS_LEGACY_BLOCK_END
+export const ADOBE_BLOCK_START = HOSTS_ADOBE_BLOCK_START
+export const ADOBE_BLOCK_END = HOSTS_ADOBE_BLOCK_END
 
 const ZAPRETGUI_START_RE = /^#\s*>>>\s*zapretgui:hosts managed begin\s*>>>\s*$/i
 const ZAPRETGUI_END_RE = /^#\s*<<<\s*zapretgui:hosts managed end\s*<<<\s*$/i
@@ -277,6 +288,59 @@ export function stripManagedBlocks(content: string, adobeHosts: Set<string>): st
   while (kept.length > 0 && kept[0].trim() === '') kept.shift()
   while (kept.length > 0 && kept[kept.length - 1].trim() === '') kept.pop()
   return kept.join('\r\n')
+}
+
+export interface UninstallStripResult {
+  /** Bytes/characters with the SkipNet blocks removed. */
+  content: string
+  /** False when the input carried no balanced SkipNet block. */
+  changed: boolean
+}
+
+/**
+ * Reference implementation of the uninstaller's hosts cleanup.
+ *
+ * `resources/uninstall-hosts-cleanup.ps1` performs the same operation on the
+ * real file (it must run after SkipNet's own code is gone). Keeping the
+ * algorithm here as a pure function gives it a fixture test that does not need
+ * PowerShell, and documents the exact contract: only a *balanced* managed block
+ * is removed, line endings are preserved, and an unterminated marker leaves the
+ * file untouched (never delete unrelated entries).
+ */
+export function stripSkipNetBlocksForUninstall(content: string): UninstallStripResult {
+  const segments = content.match(/[^\r\n]*(?:\r\n|\r|\n|$)/g) ?? []
+  const kept: string[] = []
+  let skipping: 'editor' | 'adobe' | null = null
+  let changed = false
+
+  for (const segment of segments) {
+    if (segment === '') continue
+    const trimmed = segment.replace(/[\r\n]+$/, '').trim()
+
+    if (skipping) {
+      if (skipping === 'editor' && trimmed === EDITOR_BLOCK_END) skipping = null
+      if (skipping === 'adobe' && trimmed === ADOBE_BLOCK_END) skipping = null
+      changed = true
+      continue
+    }
+
+    if (trimmed === EDITOR_BLOCK_START) {
+      skipping = 'editor'
+      changed = true
+      continue
+    }
+    if (trimmed === ADOBE_BLOCK_START) {
+      skipping = 'adobe'
+      changed = true
+      continue
+    }
+
+    kept.push(segment)
+  }
+
+  // Unterminated block: leave the file exactly as it was.
+  if (skipping) return { content, changed: false }
+  return { content: kept.join(''), changed }
 }
 
 export function buildHostsContent(

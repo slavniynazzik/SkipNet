@@ -13,12 +13,15 @@ import { tgwsBinaryPath, zapretBundleDir } from '../utils/dirs'
 import { sysBin } from '../utils/sys-bin'
 import {
   isOwnedImagePath,
+  isTrackedProcessMatch,
   listTrackedProcesses,
+  parseCimProcessIdentity,
   parseCimProcessList,
   parseTasklistCsv,
   selectOwnedKillTargets,
   untrackProcess,
   type ProcessEntry,
+  type ProcessIdentity,
   type TrackedProcess
 } from './process-ownership'
 
@@ -38,6 +41,23 @@ export function buildCimQueryScript(imageNames: readonly string[]): string {
   return (
     `Get-CimInstance Win32_Process -Filter "${filters}" | ` +
     "ForEach-Object { '{0}|{1}' -f $_.ProcessId, $_.ExecutablePath }"
+  )
+}
+
+/**
+ * Same query, but also emits the process creation time (Unix ms). R-12 needs
+ * it to reject a recycled PID before killing a tracked process.
+ */
+export function buildCimIdentityQueryScript(imageNames: readonly string[]): string {
+  const filters = imageNames.map((name) => `Name='${name.replace(/'/g, "''")}'`).join(' or ')
+  return (
+    `Get-CimInstance Win32_Process -Filter "${filters}" | ` +
+    'ForEach-Object { ' +
+    `$created = ''; ` +
+    'if ($_.CreationDate) { ' +
+    '$created = [DateTimeOffset]::new($_.CreationDate).ToUnixTimeMilliseconds() ' +
+    '}; ' +
+    "'{0}|{1}|{2}' -f $_.ProcessId, $_.ExecutablePath, $created }"
   )
 }
 
@@ -96,6 +116,20 @@ export async function enumerateProcesses(
   return parseCimProcessList(out)
 }
 
+/** Enumerate the requested images with path and creation time (async). */
+export async function enumerateProcessIdentities(
+  imageNames: readonly string[],
+  timeoutMs = 5000
+): Promise<ProcessIdentity[]> {
+  if (process.platform !== 'win32' || imageNames.length === 0) return []
+  const out = await execFileAsync(
+    sysBin('powershell.exe'),
+    [...POWERSHELL_ARGS, buildCimIdentityQueryScript(imageNames)],
+    timeoutMs
+  )
+  return parseCimProcessIdentity(out)
+}
+
 function enumerateProcessesSync(
   imageNames: readonly string[],
   timeoutMs = 4000
@@ -115,6 +149,15 @@ export async function enumerateOwnedProcesses(
   roots: readonly string[] = ownedProcessRoots()
 ): Promise<ProcessEntry[]> {
   const entries = await enumerateProcesses(imageNames)
+  return entries.filter((entry) => isOwnedImagePath(entry.imagePath, roots))
+}
+
+/** Owned processes with their creation time, so adoption can track it. */
+export async function enumerateOwnedProcessIdentities(
+  imageNames: readonly string[],
+  roots: readonly string[] = ownedProcessRoots()
+): Promise<ProcessIdentity[]> {
+  const entries = await enumerateProcessIdentities(imageNames)
   return entries.filter((entry) => isOwnedImagePath(entry.imagePath, roots))
 }
 
@@ -166,9 +209,60 @@ function matchesComponent(
   return component === undefined || entry.component === component
 }
 
+function trackedImageNames(targets: readonly TrackedProcess[]): string[] {
+  const names = new Set<string>()
+  for (const entry of targets) {
+    const name = path.basename(entry.imagePath || '')
+    if (name) names.add(name)
+  }
+  return [...names]
+}
+
+function verifiedTrackedPids(
+  targets: readonly TrackedProcess[],
+  actual: readonly ProcessIdentity[],
+  roots: readonly string[]
+): Set<number> {
+  const byPid = new Map(actual.map((entry) => [entry.pid, entry]))
+  const verified = new Set<number>()
+  for (const entry of targets) {
+    if (isTrackedProcessMatch(entry, byPid.get(entry.pid), roots)) {
+      verified.add(entry.pid)
+    } else {
+      // R-12: PID reuse or a replaced executable. Leave it alone; the
+      // owned-image fallback can still prove a process is ours by path.
+      console.warn(
+        `[process-kill] PID ${entry.pid} is no longer the tracked process — not killing it`
+      )
+    }
+  }
+  return verified
+}
+
+async function verifyTrackedTargets(
+  targets: readonly TrackedProcess[]
+): Promise<Set<number>> {
+  if (targets.length === 0) return new Set()
+  const actual = await enumerateProcessIdentities(trackedImageNames(targets))
+  return verifiedTrackedPids(targets, actual, ownedProcessRoots())
+}
+
+function verifyTrackedTargetsSync(targets: readonly TrackedProcess[]): Set<number> {
+  if (targets.length === 0) return new Set()
+  const names = trackedImageNames(targets)
+  if (names.length === 0) return new Set()
+  const out = spawnSyncOut(
+    sysBin('powershell.exe'),
+    [...POWERSHELL_ARGS, buildCimIdentityQueryScript(names)],
+    4000
+  )
+  return verifiedTrackedPids(targets, parseCimProcessIdentity(out), ownedProcessRoots())
+}
+
 /**
  * Kill tracked PIDs (optionally only one component) and forget them.
- * Returns the PIDs that were targeted.
+ * Returns the PIDs that were actually killed: a PID whose live process no
+ * longer matches the tracked identity is dropped from the tracker untouched.
  */
 export async function killTrackedProcesses(
   component?: TrackedProcess['component']
@@ -176,20 +270,30 @@ export async function killTrackedProcesses(
   const targets = listTrackedProcesses(component).filter((entry) =>
     matchesComponent(entry, component)
   )
+  const verified = await verifyTrackedTargets(targets)
+  const killed: number[] = []
   for (const entry of targets) {
-    await taskkillTree(entry.pid)
+    if (verified.has(entry.pid)) {
+      await taskkillTree(entry.pid)
+      killed.push(entry.pid)
+    }
     untrackProcess(entry.pid)
   }
-  return targets.map((entry) => entry.pid)
+  return killed
 }
 
 export function killTrackedProcessesSync(component?: TrackedProcess['component']): number[] {
   const targets = listTrackedProcesses(component)
+  const verified = verifyTrackedTargetsSync(targets)
+  const killed: number[] = []
   for (const entry of targets) {
-    taskkillTreeSync(entry.pid)
+    if (verified.has(entry.pid)) {
+      taskkillTreeSync(entry.pid)
+      killed.push(entry.pid)
+    }
     untrackProcess(entry.pid)
   }
-  return targets.map((entry) => entry.pid)
+  return killed
 }
 
 /**
@@ -227,8 +331,14 @@ export function killOwnedImagesSync(
 
 /**
  * Tracked-first kill used by every stop path:
- *  1. the PIDs this instance spawned for the component;
- *  2. only if none, the owned-image fallback (orphans from a previous crash).
+ *  1. the PIDs this instance spawned for the component (identity-verified);
+ *  2. the owned-image enumeration, unconditionally.
+ *
+ * Step 2 is not just the "orphan from a previous crash" fallback any more:
+ * R-12 can reject a *live* tracked PID when its creation time cannot be proven
+ * (an adopted `winws.exe` started seconds before we recorded it). Running the
+ * path-based enumeration as well makes sure that process is still stopped,
+ * while never touching a foreign install (the path must be inside our tree).
  */
 export async function killOwnedComponent(
   component: TrackedProcess['component'],
@@ -236,8 +346,8 @@ export async function killOwnedComponent(
   roots: readonly string[] = ownedProcessRoots()
 ): Promise<number[]> {
   const trackedKilled = await killTrackedProcesses(component)
-  if (trackedKilled.length > 0) return trackedKilled
-  return killOwnedImages(imageNames, roots)
+  const ownedKilled = await killOwnedImages(imageNames, roots)
+  return [...new Set([...trackedKilled, ...ownedKilled])]
 }
 
 export function killOwnedComponentSync(
@@ -246,8 +356,8 @@ export function killOwnedComponentSync(
   roots: readonly string[] = ownedProcessRoots()
 ): number[] {
   const trackedKilled = killTrackedProcessesSync(component)
-  if (trackedKilled.length > 0) return trackedKilled
-  return killOwnedImagesSync(imageNames, roots)
+  const ownedKilled = killOwnedImagesSync(imageNames, roots)
+  return [...new Set([...trackedKilled, ...ownedKilled])]
 }
 
 /**

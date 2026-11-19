@@ -3,6 +3,7 @@ import {
   clearDiscordCache,
   fixTcpTimestamps,
   fixWindivertConflict,
+  isInsideDirectory,
   previewDiagnosticFix,
   removeConflictingBypasses
 } from '@main/core/zapret-diagnostics'
@@ -49,6 +50,28 @@ describe('destructive diagnostics require confirmation', () => {
     expect(result.cleared).toEqual([])
     expect(result.failed).toEqual([])
     expect(result.message).toMatch(/подтвержд|нечего/i)
+  })
+})
+
+describe('isInsideDirectory (R-10 containment)', () => {
+  const appData = 'C:\\Users\\me\\AppData\\Roaming'
+
+  it('accepts a strict descendant', () => {
+    expect(isInsideDirectory(`${appData}\\discord\\Cache`, appData)).toBe(true)
+    expect(isInsideDirectory(`${appData}\\discordptb`, appData)).toBe(true)
+  })
+
+  it('rejects the root itself and sibling names that share the prefix', () => {
+    expect(isInsideDirectory(appData, appData)).toBe(false)
+    expect(isInsideDirectory('C:\\Users\\me\\AppData\\Roaming-evil\\discord', appData)).toBe(
+      false
+    )
+    expect(isInsideDirectory('C:\\Windows\\System32', appData)).toBe(false)
+  })
+
+  it('rejects empty input', () => {
+    expect(isInsideDirectory('', appData)).toBe(false)
+    expect(isInsideDirectory(`${appData}\\discord`, '')).toBe(false)
   })
 })
 

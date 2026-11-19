@@ -15,7 +15,9 @@ import {
   fsyncSync,
   openSync,
   readFileSync,
+  readdirSync,
   renameSync,
+  statSync,
   unlinkSync,
   writeFileSync,
   writeSync
@@ -26,9 +28,10 @@ import { execFile } from 'node:child_process'
 import { psQuote, runPowerShellElevated } from '../utils/elevated'
 import { secureStagingDir } from '../utils/secure-staging'
 import { sysBin, windowsRoot } from '../utils/sys-bin'
+import { HOSTS_EDITOR_BLOCK_END, HOSTS_EDITOR_BLOCK_START } from '../../shared/hosts-markers'
 
-const BLOCK_START = '# --- SkipNet hosts editor BEGIN ---'
-const BLOCK_END = '# --- SkipNet hosts editor END ---'
+const BLOCK_START = HOSTS_EDITOR_BLOCK_START
+const BLOCK_END = HOSTS_EDITOR_BLOCK_END
 
 /**
  * UTF-16 hosts files are unreadable to the latin1 round-trip this module uses
@@ -153,7 +156,76 @@ export interface HostsWriteResult {
   error?: string
 }
 
-const HOSTS_TEMP_PREFIX = 'hosts.skipnet-'
+export const HOSTS_TEMP_PREFIX = 'hosts.skipnet-'
+/** Leftover temp files older than this were abandoned by a crashed write. */
+export const HOSTS_TEMP_MAX_AGE_MS = 60 * 60 * 1000
+
+/**
+ * Pure predicate for the stale-temp sweep: a real SkipNet temp file, inside
+ * the hosts directory, older than `maxAgeMs`. Anything else is left alone —
+ * another file that merely looks similar must never be deleted from the
+ * privileged `drivers\etc` directory.
+ */
+export function isStaleHostsTempFile(
+  file: string,
+  hostsDir: string,
+  mtimeMs: number,
+  now: number = Date.now(),
+  maxAgeMs: number = HOSTS_TEMP_MAX_AGE_MS
+): boolean {
+  if (!Number.isFinite(mtimeMs) || !Number.isFinite(now)) return false
+  const name = path.basename(file)
+  if (!name.startsWith(HOSTS_TEMP_PREFIX) || !name.endsWith('.tmp')) return false
+  if (path.resolve(path.dirname(file)) !== path.resolve(hostsDir)) return false
+  return now - mtimeMs > maxAgeMs
+}
+
+let hostsTempSwept = false
+
+/** Allow the suite to exercise the first-apply sweep more than once. */
+export function resetHostsTempSweepForTesting(): void {
+  hostsTempSwept = false
+}
+
+/**
+ * Best-effort: on the first apply of the session remove abandoned
+ * `hosts.skipnet-*.tmp` files from a previous crash or a killed elevated run.
+ * Only files older than an hour are touched, so a concurrent write (another
+ * instance, an AV retry) is not disturbed.
+ */
+export function sweepStaleHostsTemps(
+  hostsDir: string = path.dirname(windowsHostsPath()),
+  now: number = Date.now()
+): number {
+  if (hostsTempSwept) return 0
+  hostsTempSwept = true
+  let removed = 0
+  try {
+    for (const entry of readdirSync(hostsDir, { withFileTypes: true })) {
+      if (!entry.isFile()) continue
+      const file = path.join(hostsDir, entry.name)
+      let mtimeMs: number
+      try {
+        mtimeMs = statSync(file).mtimeMs
+      } catch {
+        continue
+      }
+      if (!isStaleHostsTempFile(file, hostsDir, mtimeMs, now)) continue
+      try {
+        unlinkSync(file)
+        removed++
+      } catch {
+        /* best effort — a locked temp file is retried next launch */
+      }
+    }
+  } catch {
+    /* drivers\etc unreadable: nothing to sweep */
+  }
+  if (removed > 0) {
+    console.warn(`[hosts] removed ${removed} stale temp file(s) from ${hostsDir}`)
+  }
+  return removed
+}
 
 /**
  * Atomic in-place write: temp file **in the same directory** (a rename across
@@ -292,6 +364,9 @@ export function writeHostsContent(content: string): HostsWriteResult {
 
 /** Same writer with an explicit target, used by tests and future backups. */
 export function writeHostsContentTo(target: string, content: string): HostsWriteResult {
+  // First apply of this session: clear abandoned temp files. Runs before the
+  // write so a previous crash cannot leave privileged garbage behind forever.
+  sweepStaleHostsTemps(path.dirname(target))
   try {
     writeHostsFileAtomically(target, Buffer.from(content, 'latin1'))
     return { ok: true, elevated: false }
