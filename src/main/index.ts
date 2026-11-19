@@ -10,7 +10,8 @@ import { init } from './utils/init'
 import { getAppConfig, getAppConfigSync } from './config'
 import { createTray, isTrayActive, refreshTray } from './resolve/tray'
 import { createApplicationMenu } from './resolve/menu'
-import { initShortcut } from './resolve/shortcut'
+import { applyShortcuts } from './resolve/shortcut'
+import { getMainWindow, setMainWindow, setMainWindowActions } from './resolve/window-ref'
 import { startTgws, stopTgws } from './core/tgws'
 import { startZapret, stopZapret } from './core/zapret'
 import { appLog } from './utils/app-logger'
@@ -49,12 +50,10 @@ registerWallpaperScheme()
 // config, so the rebrand does not wipe an existing installation's settings.
 migrateLegacyData()
 
-export let mainWindow: BrowserWindow | null = null
-
-/** Legacy re-export, kept minimal. */
 export function showError(title: string, message: string): void {
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('showError', title, message)
+  const win = getMainWindow()
+  if (win && !win.isDestroyed()) {
+    win.webContents.send('showError', title, message)
   } else {
     dialog.showErrorBox(title, message)
   }
@@ -210,9 +209,7 @@ app.whenReady().then(async () => {
 
   await createWindow(appConfig)
 
-  const uiTasks: Promise<unknown>[] = [initShortcut()]
-  if (!appConfig.disableTray) uiTasks.push(createTray())
-  await Promise.all(uiTasks)
+  if (!appConfig.disableTray) await createTray()
 
   app.on('activate', () => {
     showMainWindow()
@@ -370,7 +367,7 @@ export async function createWindow(appConfig?: AppConfig): Promise<void> {
   // is never allowed — the recovery path would vanish.
   const initialSkipTaskbar = !!config.hideTaskbarIcon && !config.disableTray
 
-  mainWindow = new BrowserWindow({
+  const win = new BrowserWindow({
     minWidth: 860,
     minHeight: 600,
     width: mainWindowState.width,
@@ -399,18 +396,19 @@ export async function createWindow(appConfig?: AppConfig): Promise<void> {
       webSecurity: true
     }
   })
-  mainWindowState.manage(mainWindow)
+  setMainWindow(win)
+  mainWindowState.manage(win)
 
-  mainWindow.on('ready-to-show', () => {
+  win.on('ready-to-show', () => {
     // Only honour silentStart when the tray icon is enabled — otherwise the
     // window would be invisible AND there'd be no tray icon to bring it back,
     // which is exactly the "app launches into nothing" bug we hit before.
     if (silentStart && !config.disableTray) return
-    mainWindow?.show()
-    mainWindow?.focus()
+    win.show()
+    win.focus()
   })
 
-  mainWindow.on('close', (e) => {
+  win.on('close', (e) => {
     if (isQuitting) return
     const cfg = getAppConfigSync()
     const trayOn = !cfg.disableTray
@@ -420,12 +418,12 @@ export async function createWindow(appConfig?: AppConfig): Promise<void> {
       e.preventDefault()
       if (hideTaskbarOn) {
         appLog('info', 'Окно скрыто в трей (таскбар отключён)')
-        mainWindow?.setSkipTaskbar(true)
-        mainWindow?.hide()
+        win.setSkipTaskbar(true)
+        win.hide()
       } else {
         appLog('info', 'Окно свёрнуто (доступно в панели задач и в трее)')
-        mainWindow?.setSkipTaskbar(false)
-        mainWindow?.minimize()
+        win.setSkipTaskbar(false)
+        win.minimize()
       }
       return
     }
@@ -433,34 +431,34 @@ export async function createWindow(appConfig?: AppConfig): Promise<void> {
     // Tray off (or tray creation failed) → real close → before-quit cleanup.
   })
 
-  mainWindow.on('closed', () => {
-    mainWindow = null
+  win.on('closed', () => {
+    setMainWindow(null)
   })
 
   const onWindowVisibilityChange = (kind: string): void => {
     refreshTray().catch(() => void 0)
     try {
-      mainWindow?.webContents.send('window:visibility', kind)
+      win.webContents.send('window:visibility', kind)
     } catch {
       /* noop */
     }
   }
-  mainWindow.on('show', () => onWindowVisibilityChange('show'))
-  mainWindow.on('hide', () => onWindowVisibilityChange('hide'))
-  mainWindow.on('minimize', () => onWindowVisibilityChange('minimize'))
-  mainWindow.on('restore', () => onWindowVisibilityChange('restore'))
-  mainWindow.on('focus', () => onWindowVisibilityChange('focus'))
-  mainWindow.on('blur', () => onWindowVisibilityChange('blur'))
-  mainWindow.on('maximize', () => {
+  win.on('show', () => onWindowVisibilityChange('show'))
+  win.on('hide', () => onWindowVisibilityChange('hide'))
+  win.on('minimize', () => onWindowVisibilityChange('minimize'))
+  win.on('restore', () => onWindowVisibilityChange('restore'))
+  win.on('focus', () => onWindowVisibilityChange('focus'))
+  win.on('blur', () => onWindowVisibilityChange('blur'))
+  win.on('maximize', () => {
     try {
-      mainWindow?.webContents.send('window-maximized')
+      win.webContents.send('window-maximized')
     } catch {
       /* noop */
     }
   })
-  mainWindow.on('unmaximize', () => {
+  win.on('unmaximize', () => {
     try {
-      mainWindow?.webContents.send('window-unmaximized')
+      win.webContents.send('window-unmaximized')
     } catch {
       /* noop */
     }
@@ -468,43 +466,52 @@ export async function createWindow(appConfig?: AppConfig): Promise<void> {
 
   // Any click that wants a new window is denied; plain http(s) links are sent
   // to the user's browser instead.
-  mainWindow.webContents.setWindowOpenHandler(denyWindowOpen)
+  win.webContents.setWindowOpenHandler(denyWindowOpen)
 
   // The renderer only ever needs the local app page. A navigation to a remote
   // origin would keep the preload and its IPC access, so only the exact
   // renderer URL (dev origin or our own index.html) may be loaded. Hash
   // changes stay in-page and reloads resolve to the same URL.
-  mainWindow.webContents.on('will-navigate', (event, url) => guardNavigation(event, url))
-  mainWindow.webContents.on('will-redirect', (event, url) => guardNavigation(event, url))
+  win.webContents.on('will-navigate', (event, url) => guardNavigation(event, url))
+  win.webContents.on('will-redirect', (event, url) => guardNavigation(event, url))
 
   if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
-    mainWindow.loadURL(process.env['ELECTRON_RENDERER_URL'])
+    win.loadURL(process.env['ELECTRON_RENDERER_URL'])
   } else {
-    mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
+    win.loadFile(join(__dirname, '../renderer/index.html'))
   }
+
+  // Q8: register global shortcuts here as well as at startup — `createWindow`
+  // is the single path for both, and a recreated window must keep them alive.
+  // Re-registration is not on a timer; `applyShortcuts` unregisters first.
+  applyShortcuts(config)
 }
 
 export async function showMainWindow(): Promise<void> {
-  if (!mainWindow) await createWindow()
-  const w = mainWindow as BrowserWindow | null
-  if (!w) return
-  if (w.isMinimized()) w.restore()
+  if (!getMainWindow()) await createWindow()
+  const win = getMainWindow()
+  if (!win) return
+  if (win.isMinimized()) win.restore()
   // Restore skipTaskbar according to the CURRENT hideTaskbarIcon setting.
   const cfg = getAppConfigSync()
   const shouldSkip = !!cfg.hideTaskbarIcon && !cfg.disableTray
-  w.setSkipTaskbar(shouldSkip)
-  w.show()
-  w.focus()
+  win.setSkipTaskbar(shouldSkip)
+  win.show()
+  win.focus()
 }
 
 export function closeMainWindow(): void {
-  mainWindow?.close()
+  getMainWindow()?.close()
 }
 
 export async function triggerMainWindow(): Promise<void> {
-  if (mainWindow && mainWindow.isVisible()) {
-    mainWindow.hide()
+  const win = getMainWindow()
+  if (win && win.isVisible()) {
+    win.hide()
   } else {
     await showMainWindow()
   }
 }
+
+// Resolve/* imports the commands from `window-ref`, never from this barrel.
+setMainWindowActions({ show: showMainWindow, trigger: triggerMainWindow })

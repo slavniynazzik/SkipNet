@@ -38,7 +38,10 @@ jobs:
         run: pnpm typecheck
 
       - name: Lint
-        run: pnpm exec eslint . --ext .js,.jsx,.cjs,.mjs,.ts,.tsx,.cts,.mts
+        run: pnpm lint
+
+      - name: Main import cycles
+        run: pnpm check:imports
 
       - name: Typecheck tests
         run: pnpm typecheck:test

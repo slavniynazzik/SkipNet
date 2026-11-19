@@ -14,8 +14,6 @@ const FULL_PATCH: Partial<AppConfig> = {
   hideTaskbarIcon: true,
   autoLaunch: true,
   silentStart: false,
-  launchTelegram: true,
-  launchDiscord: false,
   language: 'ru-RU',
   autoCheckUpdate: true,
   dismissedAppUpdateTag: 'v1.5.0',
@@ -61,7 +59,6 @@ const FULL_PATCH: Partial<AppConfig> = {
     gameFilterUdpRange: '1024-65535,2048',
     ipsetMode: 'loaded',
     checkUpdates: true,
-    useService: false,
     installedVersion: '1.10.4',
     dismissedUpdateTag: 'v1.10.4'
   }

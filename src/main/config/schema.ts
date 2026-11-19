@@ -132,7 +132,6 @@ const ZAPRET_FIELDS: Record<string, FieldSpec> = {
   },
   ipsetMode: { kind: 'enum', values: ['none', 'loaded', 'any'] },
   checkUpdates: { kind: 'boolean' },
-  useService: { kind: 'boolean' },
   installedVersion: { kind: 'string', maxLength: 128 },
   dismissedUpdateTag: { kind: 'string', maxLength: 128 }
 }
@@ -148,8 +147,6 @@ const APP_CONFIG_FIELDS: Record<string, FieldSpec> = {
   hideTaskbarIcon: { kind: 'boolean' },
   autoLaunch: { kind: 'boolean' },
   silentStart: { kind: 'boolean' },
-  launchTelegram: { kind: 'boolean' },
-  launchDiscord: { kind: 'boolean' },
   language: { kind: 'enum', values: ['en-US', 'ru-RU', 'zh-CN'] },
   autoCheckUpdate: { kind: 'boolean' },
   dismissedAppUpdateTag: { kind: 'string', maxLength: 128 },

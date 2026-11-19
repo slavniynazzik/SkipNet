@@ -1,44 +1,14 @@
-﻿import { copyFile, readdir, readFile, writeFile } from 'fs/promises'
+﻿import { readFile } from 'fs/promises'
 import { themesDir } from '../utils/dirs'
 import { nativeTheme } from 'electron'
 import path from 'path'
 import { existsSync } from 'fs'
-import { mainWindow } from '..'
+import { getMainWindow } from './window-ref'
 
 let insertedCSSKeyMain: string | undefined
 
 export function setNativeTheme(theme: AppTheme): void {
   nativeTheme.themeSource = theme
-}
-
-export async function resolveThemes(): Promise<{ key: string; label: string }[]> {
-  if (!existsSync(themesDir())) return [{ key: 'default.css', label: 'Default' }]
-  const files = await readdir(themesDir())
-  const themes = await Promise.all(
-    files
-      .filter((file) => file.endsWith('.css'))
-      .map(async (file) => {
-        const css = (await readFile(path.join(themesDir(), file), 'utf-8')) || ''
-        let name = file
-        if (css.startsWith('/*')) {
-          name = css.split('\n')[0].replace('/*', '').replace('*/', '').trim() || file
-        }
-        return { key: file, label: name }
-      })
-  )
-  if (themes.find((t) => t.key === 'default.css')) return themes
-  return [{ key: 'default.css', label: 'Default' }, ...themes]
-}
-
-export async function importThemes(files: string[]): Promise<void> {
-  for (const file of files) {
-    if (existsSync(file)) {
-      await copyFile(
-        file,
-        path.join(themesDir(), `${new Date().getTime().toString(16)}-${path.basename(file)}`)
-      )
-    }
-  }
 }
 
 /**
@@ -59,18 +29,13 @@ export async function readTheme(theme: string): Promise<string> {
   return await readFile(full, 'utf-8')
 }
 
-export async function writeTheme(theme: string, css: string): Promise<void> {
-  const full = themeFile(theme)
-  if (!full) throw new Error('invalid theme name')
-  await writeFile(full, css)
-}
-
 export async function applyTheme(theme: string): Promise<void> {
   const css = await readTheme(theme)
+  const win = getMainWindow()
   try {
     if (insertedCSSKeyMain) {
-      await mainWindow?.webContents.removeInsertedCSS(insertedCSSKeyMain)
+      await win?.webContents.removeInsertedCSS(insertedCSSKeyMain)
     }
-    insertedCSSKeyMain = await mainWindow?.webContents.insertCSS(css) ?? undefined
+    insertedCSSKeyMain = await win?.webContents.insertCSS(css) ?? undefined
   } catch { /* noop */ }
 }

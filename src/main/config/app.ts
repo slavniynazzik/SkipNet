@@ -223,6 +223,9 @@ export async function patchAppConfig(patch: Partial<AppConfig>): Promise<void> {
     const prevAutoLaunch = appConfig?.autoLaunch
     const prevDisableTray = appConfig?.disableTray
     const prevHideTaskbarIcon = appConfig?.hideTaskbarIcon
+    const prevShowShortcut = appConfig?.showWindowShortcut
+    const prevTgwsShortcut = appConfig?.tgwsToggleShortcut
+    const prevZapretShortcut = appConfig?.zapretToggleShortcut
 
     appConfig = deepMerge(appConfig ?? structuredClone(defaultConfig), cleanPatch)
     await safeWriteConfig(stringifyYaml(appConfig))
@@ -267,6 +270,22 @@ export async function patchAppConfig(patch: Partial<AppConfig>): Promise<void> {
       try {
         const { applySkipTaskbar } = await import('../resolve/windowVisibility')
         applySkipTaskbar()
+      } catch { /* noop */ }
+    }
+
+    // Q8: global shortcuts must follow a saved accelerator change without a
+    // restart. `applyShortcuts` unregisters all first and reports collisions.
+    const shortcutsChanged =
+      (cleanPatch.showWindowShortcut !== undefined &&
+        cleanPatch.showWindowShortcut !== prevShowShortcut) ||
+      (cleanPatch.tgwsToggleShortcut !== undefined &&
+        cleanPatch.tgwsToggleShortcut !== prevTgwsShortcut) ||
+      (cleanPatch.zapretToggleShortcut !== undefined &&
+        cleanPatch.zapretToggleShortcut !== prevZapretShortcut)
+    if (shortcutsChanged) {
+      try {
+        const { applyShortcuts } = await import('../resolve/shortcut')
+        applyShortcuts(appConfig)
       } catch { /* noop */ }
     }
 

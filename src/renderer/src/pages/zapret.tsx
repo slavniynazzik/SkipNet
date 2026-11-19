@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { toast } from 'sonner'
-import { Download, Loader2, Sparkles, FlaskConical, CheckCircle2, XCircle, RefreshCw } from 'lucide-react'
+import { Loader2, FlaskConical, CheckCircle2, XCircle, RefreshCw } from 'lucide-react'
 import { useZapretStore } from '@renderer/store/zapret-store'
 import { useZapretTestStore } from '@renderer/store/zapret-test-store'
 import {
@@ -22,6 +22,7 @@ import ZapretIcon from '@renderer/components/zapret-icon'
 import { cn, BUNDLED_ZAPRET_VERSION, POWER_ON_BANNER_STYLE, POWER_OFF_BANNER_STYLE } from '@renderer/lib/utils'
 import BasePage from '@renderer/components/base/base-page'
 import SwitcherCard from '@renderer/components/switcher-card'
+import UpdateBanner from '@renderer/components/update-banner'
 import ZapretIpListCard from '@renderer/components/zapret-iplist-card'
 import ZapretNetworkCard from '@renderer/components/zapret-network-card'
 import ZapretMaintenanceCard from '@renderer/components/zapret-maintenance-card'
@@ -230,39 +231,13 @@ const Zapret: React.FC = () => {
     <BasePage title="Zapret">
       <div className="px-4 pb-6 space-y-4">
         {showBanner && updateInfo && (
-          <div className={cn(
-            'relative flex items-center gap-3 rounded-lg border border-stroke bg-card/70 backdrop-blur-xl px-4 py-3 transition',
-            installing && 'pointer-events-none opacity-80'
-          )}>
-            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-primary/15 text-primary">
-              {installing
-                ? <Loader2 className="h-4 w-4 animate-spin" />
-                : <Sparkles className="h-4 w-4" />}
-            </div>
-            <div className="min-w-0 flex-1">
-              <div className="text-sm font-medium text-foreground">
-                {installing
-                  ? 'Устанавливаем Zapret…'
-                  : `Доступно обновление Zapret — v${updateInfo.latest}`}
-              </div>
-              <div className="text-xs text-muted-foreground truncate">
-                {installing
-                  ? 'Останавливаем winws.exe, распаковываем архив…'
-                  : `Текущая версия: v${updateInfo.installed ?? '?'}`}
-              </div>
-            </div>
-            {!installing && (
-              <div className="flex shrink-0 items-center gap-2">
-                <Button variant="ghost" size="sm" onClick={dismissUpdate}>
-                  Позже
-                </Button>
-                <Button size="sm" onClick={() => { void installUpdate() }}>
-                  <Download className="h-3.5 w-3.5" />
-                  Обновить
-                </Button>
-              </div>
-            )}
-          </div>
+          <UpdateBanner
+            kind="zapret"
+            info={updateInfo}
+            installing={installing}
+            onInstall={() => { void installUpdate() }}
+            onDismiss={dismissUpdate}
+          />
         )}
 
         <SwitcherCard

@@ -28,3 +28,4 @@ latest.yml
 
 # Local agent/skill bundles (not part of the app)
 .agents/
+skills-lock.json

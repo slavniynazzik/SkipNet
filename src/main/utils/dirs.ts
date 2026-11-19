@@ -3,8 +3,6 @@ import { cpSync, copyFileSync, existsSync, mkdirSync, readdirSync } from 'fs'
 import { app } from 'electron'
 import path from 'path'
 
-export const homeDir = app.getPath('home')
-
 /** Optional opt-in marker for a hand-made portable copy. */
 const PORTABLE_MARKER = 'PORTABLE'
 /** NSIS uninstaller written next to the exe by the installed build. */
@@ -89,14 +87,6 @@ export function migrateLegacyData(): void {
     }
     return
   }
-}
-
-export function taskDir(): string {
-  const dir = path.join(app.getPath('userData'), 'tasks')
-  if (!existsSync(dir)) {
-    mkdirSync(dir, { recursive: true })
-  }
-  return dir
 }
 
 export function exeDir(): string {

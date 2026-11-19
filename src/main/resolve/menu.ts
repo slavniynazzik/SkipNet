@@ -1,5 +1,5 @@
 ﻿import { app, Menu } from 'electron'
-import { showMainWindow } from '..'
+import { showMainWindow } from './window-ref'
 
 export async function createApplicationMenu(): Promise<void> {
   const template: Electron.MenuItemConstructorOptions[] = [

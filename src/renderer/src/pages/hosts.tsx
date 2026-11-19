@@ -108,9 +108,9 @@ const Hosts: React.FC = () => {
   const controlsLocked = legacyPresent || legacySkipNet || uiBusy
 
   const accept = useCallback((result: HostsOperationResult, success?: string): void => {
-    // Mutating RPCs return the whole ~226 KB catalog. Keep the catalog we
-    // already hold (same object reference → memoised cards skip) and merge
-    // only what actually changed in this operation.
+    // Mutating RPCs no longer return the catalog (it is ~226 KB and never
+    // changes on a toggle). Keep the catalog object we already hold so the
+    // memoised cards skip re-rendering, and merge only what changed.
     setOverview((prev) =>
       prev
         ? {
@@ -119,7 +119,7 @@ const Hosts: React.FC = () => {
             status: result.status,
             recovery: result.recovery
           }
-        : result
+        : prev
     )
     setError(null)
     toast.success(success ?? result.message, {

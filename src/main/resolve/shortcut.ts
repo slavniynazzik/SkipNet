@@ -1,6 +1,5 @@
 ﻿import { globalShortcut } from 'electron'
-import { getAppConfig } from '../config'
-import { triggerMainWindow } from '..'
+import { triggerMainWindow } from './window-ref'
 import { startTgws, stopTgws, getTgwsStatus } from '../core/tgws'
 import { startZapret, stopZapret, getZapretStatus } from '../core/zapret'
 import { appLog } from '../utils/app-logger'
@@ -10,17 +9,26 @@ import {
   type ShortcutBinding
 } from './shortcut-status'
 
-export async function initShortcut(): Promise<void> {
-  const cfg = await getAppConfig()
+/**
+ * (Re-)register every global shortcut from `config`.
+ *
+ * `globalShortcut.unregisterAll()` runs first so a changed accelerator does not
+ * leave the old binding alive and so the same combination can be re-bound
+ * after a config patch. `register()` returns false when another app owns the
+ * combination; those failures are stored for diagnostics and returned here.
+ * Never called on a timer — only at startup, on window recreation and after a
+ * config patch that actually changed one of the shortcut fields.
+ */
+export function applyShortcuts(config: AppConfig): string[] {
   globalShortcut.unregisterAll()
 
   const bindings: ShortcutBinding[] = []
-  if (cfg.showWindowShortcut) {
-    bindings.push({ accelerator: cfg.showWindowShortcut, handler: () => triggerMainWindow() })
+  if (config.showWindowShortcut) {
+    bindings.push({ accelerator: config.showWindowShortcut, handler: () => triggerMainWindow() })
   }
-  if (cfg.tgwsToggleShortcut) {
+  if (config.tgwsToggleShortcut) {
     bindings.push({
-      accelerator: cfg.tgwsToggleShortcut,
+      accelerator: config.tgwsToggleShortcut,
       handler: () => {
         const s = getTgwsStatus().state
         if (s === 'running') stopTgws().catch(() => void 0)
@@ -28,9 +36,9 @@ export async function initShortcut(): Promise<void> {
       }
     })
   }
-  if (cfg.zapretToggleShortcut) {
+  if (config.zapretToggleShortcut) {
     bindings.push({
-      accelerator: cfg.zapretToggleShortcut,
+      accelerator: config.zapretToggleShortcut,
       handler: () => {
         const s = getZapretStatus().state
         if (s === 'running') stopZapret().catch(() => void 0)
@@ -49,4 +57,5 @@ export async function initShortcut(): Promise<void> {
   if (result.failed.length > 0) {
     appLog('warn', `Не удалось зарегистрировать горячие клавиши: ${result.failed.join(', ')}`)
   }
+  return result.failed
 }

@@ -1,7 +1,7 @@
 ﻿import { app, Menu, nativeImage, Tray } from 'electron'
 import { resolve, join } from 'path'
 import { existsSync } from 'fs'
-import { mainWindow, triggerMainWindow, showMainWindow } from '..'
+import { getMainWindow, showMainWindow, triggerMainWindow } from './window-ref'
 import { startTgws, stopTgws, getTgwsStatus } from '../core/tgws'
 import { startZapret, stopZapret, getZapretStatus } from '../core/zapret'
 import { appLog } from '../utils/app-logger'
@@ -112,7 +112,7 @@ export async function createTray(): Promise<void> {
 
     const menu = Menu.buildFromTemplate([
       {
-        label: mainWindow?.isVisible() ? 'Скрыть окно' : 'Показать окно',
+        label: getMainWindow()?.isVisible() ? 'Скрыть окно' : 'Показать окно',
         click: () => triggerMainWindow()
       },
       { type: 'separator' },

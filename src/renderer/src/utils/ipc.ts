@@ -383,9 +383,3 @@ export const windowIsMaximized = (): Promise<boolean> => invoke('windowIsMaximiz
 export const windowMinimize = (): Promise<void> => invoke('windowMinimize')
 export const windowMaximize = (): Promise<void> => invoke('windowMaximize')
 export const windowClose = (): Promise<void> => invoke('windowClose')
-
-// Deprecated legacy stubs used by components we haven't pruned yet.
-export const needsFirstRunAdmin = async (): Promise<boolean> => false
-export const restartAsAdmin = async (): Promise<void> => {
-  await appRelaunch()
-}

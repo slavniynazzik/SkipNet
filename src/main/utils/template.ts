@@ -64,7 +64,6 @@ export const defaultConfig: AppConfig = {
     gameFilterTcpRange: '1024-65535',
     gameFilterUdpRange: '1024-65535',
     ipsetMode: 'loaded',
-    checkUpdates: true,
-    useService: false
+    checkUpdates: true
   }
 }

@@ -3,7 +3,7 @@ import ReactDOM from 'react-dom/client'
 import { HashRouter } from 'react-router-dom'
 import { ThemeProvider as NextThemesProvider } from 'next-themes'
 import { toast } from 'sonner'
-import { init, platform } from '@renderer/utils/init'
+import { platform } from '@renderer/utils/init'
 import '@renderer/assets/main.css'
 import App from '@renderer/App'
 import BaseErrorBoundary from './components/base/base-error-boundary'
@@ -11,24 +11,22 @@ import { Toaster } from './components/ui/sonner'
 import { appQuit } from './utils/ipc'
 import { AppConfigProvider } from './hooks/use-app-config'
 
-init().then(() => {
-  const quit = (): void => {
-    void appQuit().catch((e: unknown) => {
-      toast.error('Не удалось закрыть приложение', {
-        description: e instanceof Error ? e.message : String(e)
-      })
+const quit = (): void => {
+  void appQuit().catch((e: unknown) => {
+    toast.error('Не удалось закрыть приложение', {
+      description: e instanceof Error ? e.message : String(e)
     })
-  }
-  document.addEventListener('keydown', (e) => {
-    if (platform !== 'darwin' && e.ctrlKey && e.key === 'q') {
-      e.preventDefault()
-      quit()
-    }
-    if (platform === 'darwin' && e.metaKey && e.key === 'q') {
-      e.preventDefault()
-      quit()
-    }
   })
+}
+document.addEventListener('keydown', (e) => {
+  if (platform !== 'darwin' && e.ctrlKey && e.key === 'q') {
+    e.preventDefault()
+    quit()
+  }
+  if (platform === 'darwin' && e.metaKey && e.key === 'q') {
+    e.preventDefault()
+    quit()
+  }
 })
 
 ReactDOM.createRoot(document.getElementById('root') as HTMLElement).render(

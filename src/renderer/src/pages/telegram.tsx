@@ -14,12 +14,13 @@ import { Button } from '@renderer/components/ui/button'
 import { Input } from '@renderer/components/ui/input'
 import { Label } from '@renderer/components/ui/label'
 import { Card, CardContent, CardHeader, CardTitle } from '@renderer/components/ui/card'
-import { Copy, ExternalLink, MoreVertical, Download, Loader2, Sparkles, RefreshCw } from 'lucide-react'
+import { Copy, ExternalLink, MoreVertical, Loader2, RefreshCw } from 'lucide-react'
 import TelegramIcon from '@renderer/components/telegram-icon'
 import ReloadTgwsIcon from '@renderer/components/reload-tgws-icon'
 import BasePage from '@renderer/components/base/base-page'
 import SwitcherCard from '@renderer/components/switcher-card'
-import { cn, POWER_ON_BANNER_STYLE, BUNDLED_TGWS_VERSION } from '@renderer/lib/utils'
+import UpdateBanner from '@renderer/components/update-banner'
+import { POWER_ON_BANNER_STYLE, BUNDLED_TGWS_VERSION } from '@renderer/lib/utils'
 
 // Re-export the shared banner style under the legacy name so the
 // existing toast.success({ style: POWER_ON_TOAST_STYLE }) call sites
@@ -236,39 +237,13 @@ const TelegramPage: React.FC = () => {
     <BasePage title="Telegram">
       <div className="px-4 pb-6 space-y-4">
         {showBanner && updateInfo && (
-          <div className={cn(
-            'relative flex items-center gap-3 rounded-lg border border-stroke bg-card/70 backdrop-blur-xl px-4 py-3 transition',
-            installing && 'pointer-events-none opacity-80'
-          )}>
-            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-primary/15 text-primary">
-              {installing
-                ? <Loader2 className="h-4 w-4 animate-spin" />
-                : <Sparkles className="h-4 w-4" />}
-            </div>
-            <div className="min-w-0 flex-1">
-              <div className="text-sm font-medium text-foreground">
-                {installing
-                  ? 'Устанавливаем TgWsProxy…'
-                  : `Доступно обновление TgWsProxy — v${updateInfo.latest}`}
-              </div>
-              <div className="text-xs text-muted-foreground truncate">
-                {installing
-                  ? 'Останавливаем прокси, перезаписываем бинарник…'
-                  : `Текущая версия: v${updateInfo.installed ?? '?'}`}
-              </div>
-            </div>
-            {!installing && (
-              <div className="flex shrink-0 items-center gap-2">
-                <Button variant="ghost" size="sm" onClick={dismissUpdate}>
-                  Позже
-                </Button>
-                <Button size="sm" onClick={() => { void installUpdate() }}>
-                  <Download className="h-3.5 w-3.5" />
-                  Обновить
-                </Button>
-              </div>
-            )}
-          </div>
+          <UpdateBanner
+            kind="tgws"
+            info={updateInfo}
+            installing={installing}
+            onInstall={() => { void installUpdate() }}
+            onDismiss={dismissUpdate}
+          />
         )}
 
         <SwitcherCard

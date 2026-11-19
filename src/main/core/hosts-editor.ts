@@ -624,16 +624,40 @@ function scheduleDnsFlush(result: HostsOperationResult, changed: boolean): Hosts
 
 function operationResult(
   catalog: HostsCatalog,
-  source: 'bundled' | 'downloaded',
   outcome: ApplyOutcome,
   message: string
 ): HostsOperationResult {
-  return {
-    ...overviewFrom(catalog, source, outcome.state, outcome.content, {
-      recovery: outcome.recovery
-    }),
+  return mutationPayload(
+    catalog,
+    outcome.state,
+    outcome.content,
     message,
-    warnings: [...outcome.warnings, ...outcome.managed.warnings]
+    [...outcome.warnings, ...outcome.managed.warnings],
+    outcome.recovery
+  )
+}
+
+/**
+ * Build a mutation response without the catalog. `status` is computed from the
+ * bytes the operation just verified, so the renderer can refresh the counters
+ * and banners without receiving the full service list again.
+ */
+function mutationPayload(
+  catalog: HostsCatalog,
+  state: HostsState,
+  content: string,
+  message: string,
+  warnings: string[] = [],
+  recovery?: HostsStateRecovery
+): HostsOperationResult {
+  const status = buildStatus(content, state, catalog)
+  if (recovery) status.recovery = recovery
+  return {
+    state,
+    status,
+    ...(recovery ? { recovery } : {}),
+    message,
+    warnings
   }
 }
 
@@ -656,7 +680,7 @@ export async function setHostsServiceSelection(
   value: unknown
 ): Promise<HostsOperationResult> {
   const { result, changed } = await withStateLock(async () => {
-    const { catalog, source } = getHostsCatalog()
+    const { catalog } = getHostsCatalog()
     const content = readHostsRawStrict()
     const { state, recovery } = await loadEffectiveState(catalog, content)
     const service = catalog.services.find((item) => item.id === serviceId)
@@ -692,7 +716,6 @@ export async function setHostsServiceSelection(
     return {
       result: operationResult(
         catalog,
-        source,
         outcome,
         `${service.name}: ${normalized === 'off' ? 'выключен' : `включён (${profileName})`}`
       ),
@@ -704,7 +727,7 @@ export async function setHostsServiceSelection(
 
 export async function setHostsDnsForAll(profileId: string): Promise<HostsOperationResult> {
   const { result, changed } = await withStateLock(async () => {
-    const { catalog, source } = getHostsCatalog()
+    const { catalog } = getHostsCatalog()
     const profile = catalog.dnsProfiles.find((item) => item.id === profileId)
     if (!profile) throw new Error(`DNS-профиль ${profileId} не найден`)
 
@@ -737,7 +760,6 @@ export async function setHostsDnsForAll(profileId: string): Promise<HostsOperati
     return {
       result: operationResult(
         catalog,
-        source,
         outcome,
         `Профиль для включённых DNS-сервисов: ${profile.name}.${keptNote}`
       ),
@@ -749,7 +771,7 @@ export async function setHostsDnsForAll(profileId: string): Promise<HostsOperati
 
 export async function disableAllHostsServices(): Promise<HostsOperationResult> {
   const { result, changed } = await withStateLock(async () => {
-    const { catalog, source } = getHostsCatalog()
+    const { catalog } = getHostsCatalog()
     const content = readHostsRawStrict()
     const { state, recovery } = await loadEffectiveState(catalog, content)
     const selection: Record<string, HostsSelection> = {}
@@ -757,7 +779,7 @@ export async function disableAllHostsServices(): Promise<HostsOperationResult> {
     const candidate: HostsState = { ...state, selection, restoreSelection: {} }
     const outcome = await applyCandidate(catalog, candidate, { probe: 'cache', recovery })
     return {
-      result: operationResult(catalog, source, outcome, 'Все сервисы выключены'),
+      result: operationResult(catalog, outcome, 'Все сервисы выключены'),
       changed: outcome.changed
     }
   })
@@ -766,7 +788,7 @@ export async function disableAllHostsServices(): Promise<HostsOperationResult> {
 
 export async function setHostsAdobeBlock(enabled: boolean): Promise<HostsOperationResult> {
   const { result, changed } = await withStateLock(async () => {
-    const { catalog, source } = getHostsCatalog()
+    const { catalog } = getHostsCatalog()
     const content = readHostsRawStrict()
     const { state, recovery } = await loadEffectiveState(catalog, content)
     const candidate: HostsState = { ...state, adobeBlock: enabled }
@@ -774,7 +796,6 @@ export async function setHostsAdobeBlock(enabled: boolean): Promise<HostsOperati
     return {
       result: operationResult(
         catalog,
-        source,
         outcome,
         enabled ? 'Блокировка активации Adobe включена' : 'Блокировка активации Adobe выключена'
       ),
@@ -786,7 +807,7 @@ export async function setHostsAdobeBlock(enabled: boolean): Promise<HostsOperati
 
 export async function importLegacyHostsBlocks(): Promise<HostsOperationResult> {
   const { result, changed } = await withStateLock(async () => {
-    const { catalog, source } = getHostsCatalog()
+    const { catalog } = getHostsCatalog()
     const content = readHostsRawStrict()
     const { state, recovery } = await loadEffectiveState(catalog, content)
     assertBalancedBlocks(content)
@@ -799,7 +820,6 @@ export async function importLegacyHostsBlocks(): Promise<HostsOperationResult> {
       return {
         result: operationResult(
           catalog,
-          source,
           {
             state,
             content,
@@ -840,7 +860,6 @@ export async function importLegacyHostsBlocks(): Promise<HostsOperationResult> {
     return {
       result: operationResult(
         catalog,
-        source,
         outcome,
         `Импортировано сервисов: ${Object.keys(imported).length}` +
           (adobePairs.length > 0 ? ', блок Adobe сохранён' : '')
@@ -853,7 +872,7 @@ export async function importLegacyHostsBlocks(): Promise<HostsOperationResult> {
 
 export async function reapplyHostsState(forceProbe = false): Promise<HostsOperationResult> {
   const { result, changed } = await withStateLock(async () => {
-    const { catalog, source } = getHostsCatalog()
+    const { catalog } = getHostsCatalog()
     const content = readHostsRawStrict()
     const { state, recovery } = await loadEffectiveState(catalog, content)
     // «Проверить адреса» is the one apply path that really probes; a plain
@@ -863,7 +882,7 @@ export async function reapplyHostsState(forceProbe = false): Promise<HostsOperat
       recovery
     })
     return {
-      result: operationResult(catalog, source, outcome, 'Настройки hosts применены'),
+      result: operationResult(catalog, outcome, 'Настройки hosts применены'),
       changed: outcome.changed
     }
   })
@@ -1027,7 +1046,7 @@ export async function refreshHostsAddressesWith(
 ): Promise<HostsOperationResult> {
   // 1) Snapshot under the lock. No network here.
   const snapshot = await withStateLock(async () => {
-    const { catalog, source } = getHostsCatalog()
+    const { catalog } = getHostsCatalog()
     const read = readHostsRawLenient()
     const { state, recovery } = await loadEffectiveState(
       catalog,
@@ -1040,7 +1059,6 @@ export async function refreshHostsAddressesWith(
     }
     return {
       catalog,
-      source,
       recovery,
       hostnames,
       signature: hostsStateSignature(state)
@@ -1072,28 +1090,29 @@ export async function refreshHostsAddressesWith(
   // 3) Merge under the lock. Nothing was verified → do not rewrite hosts.
   if (result.stats.resolved === 0) {
     return withStateLock(async () => {
-      const { catalog, source } = getHostsCatalog()
+      const { catalog } = getHostsCatalog()
       const read = readHostsRawLenient()
       const { state, recovery } = await loadEffectiveState(
         catalog,
         read.ok ? read.content : undefined
       )
-      return {
-        ...overviewFrom(catalog, source, state, read.content, {
-          recovery: snapshot.recovery ?? recovery
-        }),
-        message: result.stats.cancelled
+      return mutationPayload(
+        catalog,
+        state,
+        read.content,
+        result.stats.cancelled
           ? `Обновление адресов отменено — ${statsParts.join(' · ')}`
           : 'Не удалось получить ни одного проверенного адреса: DoH недоступен ' +
             'или ресурсы блокируются по SNI. Попробуйте включить Zapret и повторить.' +
             (result.stats.timedOut ? ' Проверка остановлена по таймауту.' : ''),
-        warnings: []
-      }
+        [],
+        snapshot.recovery ?? recovery
+      )
     })
   }
 
   const { result: opResult, changed } = await withStateLock(async () => {
-    const { catalog, source } = getHostsCatalog()
+    const { catalog } = getHostsCatalog()
     const content = readHostsRawStrict()
     const { state, recovery } = await loadEffectiveState(catalog, content)
     const merge = mergeRefreshResult({
@@ -1116,7 +1135,7 @@ export async function refreshHostsAddressesWith(
     if (cancelledNote) parts.push(cancelledNote)
 
     return {
-      result: operationResult(catalog, source, outcome, parts.join(' · ')),
+      result: operationResult(catalog, outcome, parts.join(' · ')),
       changed: outcome.changed
     }
   })
@@ -1140,7 +1159,7 @@ app.on('before-quit', () => {
 
 export async function restoreLatestHostsBackup(): Promise<HostsOperationResult> {
   const { result } = await withStateLock(async () => {
-    const { catalog, source } = getHostsCatalog()
+    const { catalog } = getHostsCatalog()
     const current = readHostsRawStrict()
     const currentHash = hashHostsContent(current)
 
@@ -1218,7 +1237,6 @@ export async function restoreLatestHostsBackup(): Promise<HostsOperationResult> 
     return {
       result: operationResult(
         catalog,
-        source,
         outcome,
         `Файл hosts восстановлен из бэкапа ${backup.file}`
       ),

@@ -3,11 +3,11 @@ import { createConnection, createServer } from 'net'
 import { existsSync } from 'fs'
 import { randomBytes } from 'crypto'
 import os from 'os'
-import { BrowserWindow } from 'electron'
 import { tgwsBinaryPath } from '../utils/dirs'
 import { getAppConfig, patchAppConfig } from '../config'
 import { verifyTgwsBinary } from './binary-integrity'
 import { redactSecrets } from '../utils/redact'
+import { broadcast } from '../utils/broadcast'
 import { killOwnedComponent, taskkillTree } from './process-kill'
 import { trackProcess, untrackProcess } from './process-ownership'
 
@@ -31,12 +31,6 @@ const NETWORK_WAIT_TIMEOUT_MS = 30_000
 const SECRET_HEX_LEN = 32
 
 // ---- broadcasting helpers --------------------------------------------------
-
-function broadcast(channel: string, ...args: unknown[]): void {
-  for (const w of BrowserWindow.getAllWindows()) {
-    if (!w.isDestroyed()) w.webContents.send(channel, ...args)
-  }
-}
 
 function log(type: ControllerLog['type'], payload: string): void {
   broadcast('log', {

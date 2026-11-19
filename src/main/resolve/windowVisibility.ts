@@ -1,4 +1,4 @@
-import { mainWindow } from '..'
+import { getMainWindow } from './window-ref'
 import { getAppConfigSync } from '../config'
 
 /**
@@ -17,6 +17,7 @@ export function shouldSkipTaskbar(): boolean {
  * Safe to call repeatedly — Electron's `setSkipTaskbar` is idempotent.
  */
 export function applySkipTaskbar(): void {
-  if (!mainWindow || mainWindow.isDestroyed()) return
-  mainWindow.setSkipTaskbar(shouldSkipTaskbar())
+  const win = getMainWindow()
+  if (!win || win.isDestroyed()) return
+  win.setSkipTaskbar(shouldSkipTaskbar())
 }

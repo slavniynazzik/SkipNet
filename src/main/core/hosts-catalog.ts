@@ -15,6 +15,7 @@ import { isIP } from 'node:net'
 import path from 'node:path'
 import { dataDir, resourcesDir } from '../utils/dirs'
 import { fetchGithub } from '../utils/github'
+import { compareVersion } from '../../shared/version'
 
 const CATALOG_FILE = 'hosts-catalog.json'
 const DOWNLOADED_FILE = 'hosts-catalog.json'
@@ -312,28 +313,6 @@ export function bundledCatalogPath(): string {
 
 export function downloadedCatalogPath(): string {
   return path.join(dataDir(), DOWNLOADED_FILE)
-}
-
-function compareVersion(a: string, b: string): number {
-  const norm = (value: string): (number | string)[] =>
-    value
-      .split(/[.+-]/)
-      .map((part) => (/^\d+$/.test(part) ? Number.parseInt(part, 10) : part))
-  const aa = norm(a)
-  const bb = norm(b)
-  const len = Math.max(aa.length, bb.length)
-  for (let i = 0; i < len; i++) {
-    const av = aa[i] ?? 0
-    const bv = bb[i] ?? 0
-    if (typeof av === 'number' && typeof bv === 'number') {
-      if (av !== bv) return av > bv ? 1 : -1
-    } else {
-      const as = String(av)
-      const bs = String(bv)
-      if (as !== bs) return as > bs ? 1 : -1
-    }
-  }
-  return 0
 }
 
 let cache: LoadedHostsCatalog | null = null

@@ -3,7 +3,6 @@ import { randomUUID } from 'crypto'
 import { existsSync, readdirSync, readFileSync, mkdirSync, rmSync, writeFileSync, renameSync } from 'fs'
 import path from 'path'
 import AdmZip from 'adm-zip'
-import { BrowserWindow } from 'electron'
 import { zapretBundleDir } from '../utils/dirs'
 import { sysBin } from '../utils/sys-bin'
 import { hasReplacementChar, sameServiceImagePath } from '../utils/service-path'
@@ -15,6 +14,7 @@ import {
 import { parseTasklistCsv, trackProcess, untrackProcess } from './process-ownership'
 import { isWindowsServiceRunning } from './zapret-diagnostics'
 import { getAppConfig } from '../config'
+import { broadcast } from '../utils/broadcast'
 import { applyGameFilterToBundle, getGameFilterSettings } from './zapret-settings'
 import {
   collectComponentExecutableFiles,
@@ -32,12 +32,6 @@ export interface StrategyDescriptor {
 
 let child: ChildProcess | null = null
 let status: CoreStatus = { state: 'stopped' }
-
-function broadcast(channel: string, ...args: unknown[]): void {
-  for (const w of BrowserWindow.getAllWindows()) {
-    if (!w.isDestroyed()) w.webContents.send(channel, ...args)
-  }
-}
 
 function log(type: ControllerLog['type'], payload: string): void {
   broadcast('log', {

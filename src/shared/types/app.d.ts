@@ -19,11 +19,6 @@ interface AppConfig {
   hideTaskbarIcon?: boolean
   autoLaunch?: boolean
   silentStart?: boolean
-  // After SkipNet starts and proxies are warmed up, launch these apps.
-  // Lets the user disable Telegram/Discord native autostart and let
-  // SkipNet orchestrate the order: proxy first, app second.
-  launchTelegram?: boolean
-  launchDiscord?: boolean
   language?: 'en-US' | 'ru-RU' | 'zh-CN'
 
   // ---- Updates
@@ -103,8 +98,6 @@ interface ZapretConfig {
   // Automatic Zapret update check (banner on the Zapret page). Mirrors
   // `utils/check_updates.enabled` in the bundle.
   checkUpdates?: boolean
-  bundlePath?: string              // legacy override, ignored (never used for execution)
-  useService?: boolean             // installed as Windows service
   // Version of the unpacked Flowseal/zapret-discord-youtube bundle in the
   // bundled resources/zapret folder. Set when the user installs/updates from
   // the auto-updater. Used to decide whether a newer GitHub release exists.

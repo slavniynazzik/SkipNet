@@ -135,7 +135,16 @@ interface HostsOverview {
   recovery?: HostsStateRecovery
 }
 
-interface HostsOperationResult extends HostsOverview {
+/**
+ * Result of a mutating hosts operation. The catalog is deliberately omitted:
+ * it is ~226 KB, never changes during a mutation, and the renderer already
+ * holds it from the initial `hosts:overview` call. Returning it on every
+ * toggle forced a full re-render of all service cards.
+ */
+interface HostsOperationResult {
+  state: HostsState
+  status: HostsFileStatus
+  recovery?: HostsStateRecovery
   message: string
   warnings: string[]
 }

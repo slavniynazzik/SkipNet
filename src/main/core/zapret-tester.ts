@@ -20,9 +20,10 @@ import { spawn, ChildProcess } from 'child_process'
 import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'fs'
 import { randomUUID } from 'crypto'
 import path from 'path'
-import { app, BrowserWindow } from 'electron'
+import { app } from 'electron'
 import { dataDir, zapretBundleDir } from '../utils/dirs'
 import { sysBin } from '../utils/sys-bin'
+import { broadcast as broadcastToAll } from '../utils/broadcast'
 import { taskkillTree } from './process-kill'
 import { trackProcess, untrackProcess } from './process-ownership'
 import {
@@ -141,10 +142,8 @@ function saveReport(report: StrategyTestReport): void {
   }
 }
 
-function broadcast(payload: TestProgress): void {
-  for (const w of BrowserWindow.getAllWindows()) {
-    if (!w.isDestroyed()) w.webContents.send('zapret:testProgress', payload)
-  }
+function emitProgress(payload: TestProgress): void {
+  broadcastToAll('zapret:testProgress', payload)
 }
 
 interface ProbeResult {
@@ -297,7 +296,7 @@ function defaultDeps(): StrategyTesterDeps {
     ensureWinDivertReady: () => ensureWinDivertReady(),
     probeAll: (signal) => probeAll(signal),
     startZapret,
-    broadcast,
+    broadcast: emitProgress,
     saveReport,
     exists: existsSync,
     now: () => Date.now()

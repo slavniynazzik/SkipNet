@@ -1,9 +1,9 @@
 import { appendFile, mkdir, readdir, rename, stat, unlink } from 'node:fs/promises'
 import path from 'node:path'
-import { BrowserWindow } from 'electron'
 import { getAppConfigSync } from '../config'
 import { logDir, logFileName } from './dirs'
 import { redactSecrets } from './redact'
+import { broadcast } from './broadcast'
 
 /** Rotate the active file before it grows past this size. */
 export const MAX_LOG_BYTES = 5 * 1024 * 1024
@@ -13,12 +13,6 @@ export const DEFAULT_MAX_LOG_DAYS = 7
 const LOG_FILE_RE = /^app-(\d{4})-(\d{2})-(\d{2})\.log(?:\.1)?$/
 
 let writeQueue: Promise<void> = Promise.resolve()
-
-function broadcast(channel: string, ...args: unknown[]): void {
-  for (const w of BrowserWindow.getAllWindows()) {
-    if (!w.isDestroyed()) w.webContents.send(channel, ...args)
-  }
-}
 
 /**
  * Exact values that must be masked in addition to the generic patterns.
