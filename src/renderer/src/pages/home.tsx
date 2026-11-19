@@ -10,15 +10,15 @@ import { useTgwsStore } from '@renderer/store/tgws-store'
 import { useZapretStore } from '@renderer/store/zapret-store'
 import { useZapretTestStore } from '@renderer/store/zapret-test-store'
 import { useAppConfig } from '@renderer/hooks/use-app-config'
+import { useUpdateCheck } from '@renderer/hooks/use-update-check'
 import {
   tgwsStart, tgwsStop, tgwsRestart,
   zapretStart, zapretStop, zapretRestart,
-  zapretCheckUpdate, tgwsCheckUpdate,
-  getAppVersion,
-  type ZapretUpdateInfo, type TgwsUpdateInfo
+  getAppVersion
 } from '@renderer/utils/ipc'
 import { Button } from '@renderer/components/ui/button'
 import { POWER_ON_BANNER_STYLE, BUNDLED_TGWS_VERSION, BUNDLED_ZAPRET_VERSION } from '@renderer/lib/utils'
+import { updateBannerVisible } from '@renderer/lib/update-check'
 import { RotateCw, Sparkles, X } from 'lucide-react'
 import Power from '@renderer/assets/on_icon.svg'
 import Pause from '@renderer/assets/pause_icon.svg'
@@ -225,26 +225,16 @@ const Home: React.FC = () => {
   const zapretStrategy = appConfig?.zapret?.activeStrategy
 
   // ---- Update notices (Zapret + TgWsProxy)
-  const [zapretUpdate, setZapretUpdate] = useState<ZapretUpdateInfo | null>(null)
-  const [tgwsUpdate, setTgwsUpdate] = useState<TgwsUpdateInfo | null>(null)
+  // Shared cached checks: Home no longer issues its own pair of GitHub
+  // requests, and honours `zapret.checkUpdates` through the hook.
+  const zapretUpdates = useUpdateCheck('zapret')
+  const tgwsUpdates = useUpdateCheck('tgws')
+  const zapretUpdate = zapretUpdates.info
+  const tgwsUpdate = tgwsUpdates.info
   const [zapretSessionDismissed, setZapretSessionDismissed] = useState(false)
   const [tgwsSessionDismissed, setTgwsSessionDismissed] = useState(false)
-  useEffect(() => {
-    zapretCheckUpdate(false).then(setZapretUpdate).catch(() => setZapretUpdate(null))
-    tgwsCheckUpdate(false).then(setTgwsUpdate).catch(() => setTgwsUpdate(null))
-  }, [])
-  const showZapretBanner =
-    !!zapretUpdate &&
-    zapretUpdate.hasUpdate &&
-    !zapretUpdate.dismissed &&
-    !!zapretUpdate.tag &&
-    !zapretSessionDismissed
-  const showTgwsBanner =
-    !!tgwsUpdate &&
-    tgwsUpdate.hasUpdate &&
-    !tgwsUpdate.dismissed &&
-    !!tgwsUpdate.tag &&
-    !tgwsSessionDismissed
+  const showZapretBanner = updateBannerVisible(zapretUpdate, zapretSessionDismissed)
+  const showTgwsBanner = updateBannerVisible(tgwsUpdate, tgwsSessionDismissed)
 
   const toggleTgws = async (next: boolean): Promise<void> => {
     try {
@@ -276,7 +266,17 @@ const Home: React.FC = () => {
   // App version pulled from main via IPC (electron's app.getVersion()
   const [appVersion, setAppVersion] = useState<string | null>(null)
   useEffect(() => {
-    getAppVersion().then(setAppVersion).catch(() => setAppVersion(null))
+    let cancelled = false
+    getAppVersion()
+      .then((value) => {
+        if (!cancelled) setAppVersion(value)
+      })
+      .catch(() => {
+        if (!cancelled) setAppVersion(null)
+      })
+    return () => {
+      cancelled = true
+    }
   }, [])
 
   const [reloading, setReloading] = useState(false)

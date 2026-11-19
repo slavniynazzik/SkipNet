@@ -1,3 +1,5 @@
+import type { AppConfigPatch } from '@renderer/lib/config-patch'
+
 interface IpcResult<T> {
   ok: boolean
   value?: T
@@ -14,7 +16,7 @@ async function invoke<T>(channel: string, ...args: unknown[]): Promise<T> {
 
 // ---- App config -------------------------------------------------------------
 export const getAppConfig = (): Promise<AppConfig> => invoke('app:getConfig')
-export const patchAppConfig = (patch: Partial<AppConfig>): Promise<void> =>
+export const patchAppConfig = (patch: AppConfigPatch): Promise<void> =>
   invoke('app:patchConfig', patch)
 export const getAppVersion = (): Promise<string> => invoke('app:version')
 
@@ -95,6 +97,8 @@ export interface StrategyTestReport {
   bundleVersion?: string
   results: Record<string, StrategyTestResult>
   bestStrategy?: string
+  /** True when the sweep was stopped early (cancel, deadline or pre-empt). */
+  cancelled?: boolean
 }
 export interface StrategyTestProgress {
   phase: 'starting' | 'testing' | 'completed' | 'error' | 'idle'
@@ -106,6 +110,9 @@ export interface StrategyTestProgress {
 }
 export const zapretRunStrategyTest = (): Promise<StrategyTestReport> =>
   invoke('zapret:runStrategyTest')
+/** Abort the sweep in flight. Resolves false when nothing was running. */
+export const zapretCancelStrategyTest = (): Promise<boolean> =>
+  invoke('zapret:cancelStrategyTest')
 export const zapretGetStrategyTestResults = (): Promise<StrategyTestReport | null> =>
   invoke('zapret:getStrategyTestResults')
 export const zapretIsStrategyTestRunning = (): Promise<boolean> =>
@@ -251,8 +258,14 @@ export const hostsRefreshAddresses = (): Promise<HostsOperationResult> =>
 export const hostsRestoreLatest = (): Promise<HostsOperationResult> =>
   invoke('hosts:restoreLatest')
 export const hostsOpenFile = (): Promise<void> => invoke('hosts:openFile')
-export const hostsFlushDns = (): Promise<{ ok: boolean; message: string }> =>
-  invoke('hosts:flushDns')
+export interface DnsFlushResult {
+  ok: boolean
+  message: string
+  /** Optional extra diagnostics returned by newer main-process builds. */
+  pwa?: string
+  runtime?: string
+}
+export const hostsFlushDns = (): Promise<DnsFlushResult> => invoke('hosts:flushDns')
 export const hostsUpdateCatalog = (): Promise<HostsCatalogUpdateResult> =>
   invoke('hosts:updateCatalog')
 

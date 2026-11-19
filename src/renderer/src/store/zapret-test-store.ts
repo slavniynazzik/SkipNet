@@ -46,17 +46,26 @@ export const attachZapretTestStore = (): (() => void) => {
     // other "power-on" success toasts (zapret install, copy-link, etc).
     if (p.phase === 'completed' && p.report && p.report.ranAt !== lastToastedRanAt) {
       lastToastedRanAt = p.report.ranAt
-      const passed = Object.values(p.report.results).filter((r) => r.passed).length
-      const total = Object.keys(p.report.results).length
-      toast.success('Тестирование стратегий завершено', {
-        description:
-          total > 0
-            ? `Прошли проверку: ${passed} из ${total}` +
-              (p.report.bestStrategy ? `. Лучшая: ${p.report.bestStrategy}` : '')
-            : undefined,
-        style: POWER_ON_BANNER_STYLE,
-        duration: 6000
-      })
+      if (p.report.cancelled) {
+        // A cancelled sweep is not a success: don't report "прошли проверку"
+        // for a partial (or empty) result set.
+        toast.info('Тестирование стратегий отменено', {
+          description: 'Прежняя стратегия восстановлена.',
+          duration: 6000
+        })
+      } else {
+        const passed = Object.values(p.report.results).filter((r) => r.passed).length
+        const total = Object.keys(p.report.results).length
+        toast.success('Тестирование стратегий завершено', {
+          description:
+            total > 0
+              ? `Прошли проверку: ${passed} из ${total}` +
+                (p.report.bestStrategy ? `. Лучшая: ${p.report.bestStrategy}` : '')
+              : undefined,
+          style: POWER_ON_BANNER_STYLE,
+          duration: 6000
+        })
+      }
     }
     if (p.phase === 'error') {
       toast.error('Тест стратегий завершён с ошибкой', {

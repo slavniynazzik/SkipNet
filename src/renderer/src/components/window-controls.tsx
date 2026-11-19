@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react'
+import { toast } from 'sonner'
 import { platform } from '@renderer/utils/init'
 import {
   windowClose,
@@ -39,20 +40,30 @@ const WindowControls: React.FC = () => {
   const handleMinimize = (e: React.MouseEvent<HTMLButtonElement>): void => {
     setSuppressHover('minimize')
     e.currentTarget.blur()
-    windowMinimize().catch(() => void 0)
+    void windowMinimize().catch((err: unknown) => {
+      toast.error('Не удалось свернуть окно', {
+        description: err instanceof Error ? err.message : String(err)
+      })
+    })
   }
   const handleMaximize = async (): Promise<void> => {
     try {
       await windowMaximize()
       setIsMaximized(Boolean(await windowIsMaximized()))
-    } catch {
-      /* IPC rejected — keep the current visual state */
+    } catch (err) {
+      toast.error('Не удалось изменить размер окна', {
+        description: err instanceof Error ? err.message : String(err)
+      })
     }
   }
   const handleClose = (e: React.MouseEvent<HTMLButtonElement>): void => {
     setSuppressHover('close')
     e.currentTarget.blur()
-    windowClose().catch(() => void 0)
+    void windowClose().catch((err: unknown) => {
+      toast.error('Не удалось закрыть окно', {
+        description: err instanceof Error ? err.message : String(err)
+      })
+    })
   }
 
   // Cleared when the cursor actually leaves the button — at that point real

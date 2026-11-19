@@ -8,14 +8,14 @@ import {
   zapretListStrategies,
   zapretStart,
   zapretStop,
-  zapretCheckUpdate,
   zapretInstallUpdate,
-  zapretDismissUpdate,
   zapretRunStrategyTest,
-  getAppConfig,
-  type ZapretUpdateInfo
+  zapretCancelStrategyTest
 } from '@renderer/utils/ipc'
 import { useAppConfig } from '@renderer/hooks/use-app-config'
+import { useUpdateCheck } from '@renderer/hooks/use-update-check'
+import { zapretPatch } from '@renderer/lib/config-patch'
+import { updateBannerVisible } from '@renderer/lib/update-check'
 import { Card, CardContent, CardHeader, CardTitle } from '@renderer/components/ui/card'
 import { Button } from '@renderer/components/ui/button'
 import ZapretIcon from '@renderer/components/zapret-icon'
@@ -40,10 +40,11 @@ const Zapret: React.FC = () => {
     Boolean((location.state as { autoStart?: boolean } | null)?.autoStart)
   )
 
-  // ---- Auto-update banner
-  const [updateInfo, setUpdateInfo] = useState<ZapretUpdateInfo | null>(null)
-  const [installing, setInstalling] = useState(false)
+  // ---- Auto-update banner (shared, cached across pages)
+  const updateCheck = useUpdateCheck('zapret')
+  const updateInfo = updateCheck.info
   const installingRef = useRef(false)
+  const [installing, setInstalling] = useState(false)
 
   // ---- Strategy test
   const testProgress = useZapretTestStore((s) => s.progress)
@@ -58,6 +59,7 @@ const Zapret: React.FC = () => {
     storedReport.bundleVersion !== zapret.installedVersion
   const testReport = reportIsStale ? null : storedReport
   const autoTestStartedRef = useRef(false)
+  const [cancelling, setCancelling] = useState(false)
 
   const refreshStrategies = (): void => {
     zapretListStrategies().then(setStrategies).catch(() => setStrategies([]))
@@ -98,29 +100,9 @@ const Zapret: React.FC = () => {
     return () => clearTimeout(t)
   }, [])
 
-  // Automatic update check can be disabled from "Обслуживание и диагностика".
-  // Don't await; the banner just stays hidden on network errors (rate-limit,
-  // offline, etc.) — surfacing that would be noise for a background check.
-  const checkUpdatesEnabled = zapret?.checkUpdates !== false
-  useEffect(() => {
-    let cancelled = false
-    if (!checkUpdatesEnabled) {
-      setUpdateInfo(null)
-      return
-    }
-    zapretCheckUpdate(false)
-      .then((info) => {
-        if (!cancelled) setUpdateInfo(info)
-      })
-      .catch(() => {
-        if (!cancelled) setUpdateInfo(null)
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [checkUpdatesEnabled])
-
-  const showBanner = !!updateInfo && updateInfo.hasUpdate && !updateInfo.dismissed && !!updateInfo.tag
+  // Automatic update check honours `zapret.checkUpdates` inside the shared
+  // hook. Background errors stay silent: the banner is simply absent.
+  const showBanner = updateBannerVisible(updateInfo)
 
   const installUpdate = async (): Promise<void> => {
     if (installingRef.current || !updateInfo?.tag) return
@@ -146,17 +128,19 @@ const Zapret: React.FC = () => {
       if (active) {
         const fresh = await zapretListStrategies().catch(() => [])
         if (!fresh.some((s) => s.file === active)) {
-          // Re-read the config: the install above just persisted the new
-          // version, so spreading the pre-install snapshot would roll it back.
-          const latestCfg = await getAppConfig()
-          await patchAppConfig({
-            zapret: { ...(latestCfg.zapret as ZapretConfig), activeStrategy: undefined }
-          })
+          // Leaf-only patch: the install above just persisted the new
+          // version, so sending a pre-install `zapret` snapshot would roll it
+          // back. A failed clear is already toasted by `patchAppConfig`.
+          await patchAppConfig(zapretPatch({ activeStrategy: undefined }))
         }
       }
-      // Re-check so the banner disappears immediately.
-      const fresh = await zapretCheckUpdate(true).catch(() => null)
-      setUpdateInfo(fresh)
+      // Re-check so the banner disappears immediately; a failed re-check must
+      // not turn a successful install into an error toast.
+      try {
+        await updateCheck.check()
+      } catch {
+        /* banner refreshes on the next automatic check */
+      }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
       toast.error('Не удалось обновить Zapret', { id: tId, description: msg })
@@ -166,21 +150,17 @@ const Zapret: React.FC = () => {
     }
   }
 
+  // The hook only hides the banner after main persisted the dismissal and
+  // shows its own error toast when the write fails (R12).
   const dismissUpdate = (): void => {
-    if (!updateInfo?.latest) return
-    void zapretDismissUpdate(updateInfo.latest).catch(() => void 0)
-    setUpdateInfo({ ...updateInfo, dismissed: true })
+    void updateCheck.dismiss()
   }
 
   // Manual "check now" — the automatic check stays silent on network errors,
   // so users need an explicit action that reports what happened.
-  const [checking, setChecking] = useState(false)
   const checkNow = async (): Promise<void> => {
-    if (checking) return
-    setChecking(true)
     try {
-      const fresh = await zapretCheckUpdate(true)
-      setUpdateInfo(fresh.hasUpdate ? { ...fresh, dismissed: false } : fresh)
+      const fresh = await updateCheck.check()
       if (fresh.hasUpdate && fresh.tag) {
         toast.info(`Доступно обновление Zapret v${fresh.latest}`, {
           description: 'Нажмите «Обновить» в баннере выше.'
@@ -195,8 +175,6 @@ const Zapret: React.FC = () => {
       toast.error('Не удалось проверить обновления', {
         description: e instanceof Error ? e.message : String(e)
       })
-    } finally {
-      setChecking(false)
     }
   }
 
@@ -206,16 +184,10 @@ const Zapret: React.FC = () => {
     const r = testReport?.results[file]
     if (r && r.tested && !r.passed) return
     if (isTestRunning || installing) return
-    await patchAppConfig({ zapret: { ...zapret!, activeStrategy: file } })
-    // `patchAppConfig` reports errors as a toast but still resolves, so verify
-    // the write actually landed before auto-starting with the old strategy.
-    const fresh = await getAppConfig().catch(() => null)
-    if (fresh?.zapret?.activeStrategy !== file) {
-      toast.error('Не удалось сохранить стратегию', {
-        description: 'Попробуйте выбрать её ещё раз.'
-      })
-      return
-    }
+    // A failure is toasted by `patchAppConfig`; don't auto-start with the old
+    // strategy or claim the selection landed.
+    const saved = await patchAppConfig(zapretPatch({ activeStrategy: file }))
+    if (!saved) return
     if (!autoStartRef.current) return
     // One-shot: drop the flag so re-clicking another strategy on this page
     // doesn't keep auto-starting and ping-ponging back to Home.
@@ -226,6 +198,23 @@ const Zapret: React.FC = () => {
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
       toast.error('Не удалось запустить Zapret', { description: msg })
+    }
+  }
+
+  const cancelTest = async (): Promise<void> => {
+    if (cancelling) return
+    setCancelling(true)
+    try {
+      const cancelled = await zapretCancelStrategyTest()
+      if (!cancelled) {
+        toast.info('Тест стратегий уже завершён')
+      }
+    } catch (e) {
+      toast.error('Не удалось отменить тест стратегий', {
+        description: e instanceof Error ? e.message : String(e)
+      })
+    } finally {
+      setCancelling(false)
     }
   }
 
@@ -278,9 +267,10 @@ const Zapret: React.FC = () => {
           onToggle={(v) => {
             if (v && !active) return
             if (isTestRunning || installing) return
-            // Return the promise so SwitcherCard awaits the IPC roundtrip and
-            // keeps the switch optimistically flipped/locked until done.
-            return (v ? zapretStart() : zapretStop()).catch(() => void 0)
+            // Return the promise so SwitcherCard awaits the IPC roundtrip,
+            // keeps the switch optimistically flipped/locked until done and
+            // surfaces a rejected start/stop with the main-process message.
+            return v ? zapretStart() : zapretStop()
           }}
           footer={
             installing
@@ -304,10 +294,10 @@ const Zapret: React.FC = () => {
           <Button
             variant="ghost"
             size="sm"
-            disabled={checking}
+            disabled={updateCheck.checking}
             onClick={() => { void checkNow() }}
           >
-            {checking
+            {updateCheck.checking
               ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
               : <RefreshCw className="h-3.5 w-3.5" />}
             Проверить
@@ -388,6 +378,19 @@ const Zapret: React.FC = () => {
                   ) : null}
                 </div>
               </div>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => { void cancelTest() }}
+                disabled={cancelling}
+                className="shrink-0"
+                title="Остановить перебор стратегий и вернуть прежнюю"
+              >
+                {cancelling
+                  ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  : <XCircle className="h-3.5 w-3.5" />}
+                Отменить тест
+              </Button>
             </div>
           ) : (
             <>

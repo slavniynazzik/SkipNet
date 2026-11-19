@@ -1,4 +1,5 @@
 import React from 'react'
+import { toast } from 'sonner'
 import { Switch } from '@renderer/components/ui/switch'
 import { cn } from '@renderer/lib/utils'
 import { Loader2 } from 'lucide-react'
@@ -49,6 +50,12 @@ const SwitcherCard: React.FC<SwitcherCardProps> = ({
     setPending(next)
     try {
       await Promise.resolve(onToggle(next))
+    } catch (e) {
+      // Start/stop IPC carries a Russian, user-facing message. Never swallow
+      // it: a rejected toggle used to look like a switch that did nothing.
+      toast.error(`Не удалось переключить ${title}`, {
+        description: e instanceof Error ? e.message : String(e)
+      })
     } finally {
       setPending(null)
     }

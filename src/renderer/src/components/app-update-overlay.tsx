@@ -1,58 +1,42 @@
 import { useEffect, useRef, useState } from 'react'
 import { Loader2, Download, Sparkles, X } from 'lucide-react'
-import {
-  appCheckUpdate,
-  appInstallUpdate,
-  appDismissUpdate,
-  type AppUpdateInfo
-} from '@renderer/utils/ipc'
-import { useAppConfig } from '@renderer/hooks/use-app-config'
+import { appInstallUpdate, type AppUpdateInfo } from '@renderer/utils/ipc'
+import { useUpdateCheck } from '@renderer/hooks/use-update-check'
 import { Button } from '@renderer/components/ui/button'
 
 const POLL_INTERVAL_MS = 60 * 60 * 1000 // 1 h
 
 export default function AppUpdateOverlay(): React.ReactElement | null {
-  const { appConfig } = useAppConfig()
-  const configReady = !!appConfig
-  // `autoCheckUpdate` was previously dead config: the overlay always polled
-  // GitHub. Respect the toggle and wait for the config to load, so a user who
-  // disabled auto-checks never sees a flash of the overlay on startup.
-  const autoCheck = appConfig?.autoCheckUpdate !== false
-  const [info, setInfo] = useState<AppUpdateInfo | null>(null)
+  // Shared cached check. The `autoCheckUpdate` gate lives in the hook, so a
+  // user who disabled automatic checks never sees a flash of the overlay on
+  // startup, and the hourly refresh reuses the same SWR entry instead of a
+  // second fetch path.
+  const appUpdates = useUpdateCheck('app')
+  const { info: sharedInfo, enabled, refresh, dismiss } = appUpdates
+  // Manual check from Settings can surface an update even when automatic
+  // checks are disabled. The page dispatches the freshly fetched info; it is
+  // only used while the shared cache has no entry (gate off).
+  const [manualInfo, setManualInfo] = useState<AppUpdateInfo | null>(null)
+  const info = sharedInfo ?? manualInfo
+
   const [installing, setInstalling] = useState(false)
   const installingRef = useRef(false)
   const [error, setError] = useState<string | null>(null)
   const [closing, setClosing] = useState(false)
+  const [dismissing, setDismissing] = useState(false)
 
   useEffect(() => {
-    if (!configReady || !autoCheck) {
-      setInfo(null)
-      return
-    }
-    let cancelled = false
-    const check = async (force = false): Promise<void> => {
-      try {
-        const next = await appCheckUpdate(force)
-        if (cancelled) return
-        setInfo(next)
-      } catch {
-        /* noop — silent in background */
-      }
-    }
-    check(false)
-    const id = window.setInterval(() => check(true), POLL_INTERVAL_MS)
-    return () => {
-      cancelled = true
-      window.clearInterval(id)
-    }
-  }, [configReady, autoCheck])
+    if (!enabled) return
+    const id = window.setInterval(() => {
+      void refresh()
+    }, POLL_INTERVAL_MS)
+    return () => window.clearInterval(id)
+  }, [enabled, refresh])
 
   useEffect(() => {
-    // Manual check from Settings can surface an update even when automatic
-    // checks are disabled: the page dispatches the freshly fetched info.
     const handler = (event: Event): void => {
       const detail = (event as CustomEvent<AppUpdateInfo>).detail
-      if (detail) setInfo(detail)
+      if (detail) setManualInfo(detail)
     }
     window.addEventListener('skipnet:app-update-available', handler)
     return () => window.removeEventListener('skipnet:app-update-available', handler)
@@ -90,16 +74,20 @@ export default function AppUpdateOverlay(): React.ReactElement | null {
   }
 
   const handleLater = async (): Promise<void> => {
+    if (dismissing) return
     if (!info?.tag) {
       setClosing(true)
       return
     }
+    setDismissing(true)
+    // The hook awaits `app:dismissUpdate`, toasts on failure and resolves
+    // false; only then may the overlay hide (R12). The banner was never
+    // optimistically dismissed, so a failed write leaves it on screen.
+    const ok = await dismiss(info)
+    setDismissing(false)
+    if (!ok) return
     setClosing(true)
-    try {
-      await appDismissUpdate(info.tag)
-    } catch {
-      /* noop — dismissal is a soft signal */
-    }
+    if (!sharedInfo) setManualInfo({ ...info, dismissed: true })
   }
 
   if (!visible || !info) return null
@@ -121,8 +109,8 @@ export default function AppUpdateOverlay(): React.ReactElement | null {
       <div className="relative w-[min(560px,92vw)] rounded-2xl border border-border bg-popover text-popover-foreground shadow-2xl p-6 sm:p-8">
         <button
           type="button"
-          onClick={handleLater}
-          disabled={installing}
+          onClick={() => { void handleLater() }}
+          disabled={installing || dismissing}
           aria-label="Закрыть"
           className="absolute top-3 right-3 size-8 inline-flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
         >
@@ -162,12 +150,12 @@ export default function AppUpdateOverlay(): React.ReactElement | null {
         <div className="mt-6 flex items-center justify-end gap-2">
           <Button
             variant="ghost"
-            onClick={handleLater}
-            disabled={installing}
+            onClick={() => { void handleLater() }}
+            disabled={installing || dismissing}
           >
-            Позже
+            {dismissing ? 'Сохраняем…' : 'Позже'}
           </Button>
-          <Button onClick={handleInstall} disabled={installing}>
+          <Button onClick={handleInstall} disabled={installing || dismissing}>
             {installing ? (
               <>
                 <Loader2 className="size-4 mr-2 animate-spin" />

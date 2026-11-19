@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { toast } from 'sonner'
 import {
@@ -21,6 +21,10 @@ import { Input } from '@renderer/components/ui/input'
 import { Switch } from '@renderer/components/ui/switch'
 import HostsServiceIcon from '@renderer/components/hosts-service-icon'
 import { cn } from '@renderer/lib/utils'
+import {
+  defaultProfileFor,
+  profileOptionsFor
+} from '@renderer/lib/hosts-profile'
 import {
   hostsApply,
   hostsDisableAll,
@@ -62,20 +66,6 @@ function formatWhen(value?: string): string {
   })
 }
 
-function hasAnswers(service: HostsService, profileId: string): boolean {
-  return (service.domains ?? []).some((domain) => (domain.answers[profileId]?.length ?? 0) > 0)
-}
-
-function defaultProfileFor(
-  service: HostsService,
-  profiles: HostsDnsProfile[],
-  preferred?: string
-): string {
-  if (service.kind !== 'dns') return 'hosts'
-  if (preferred && hasAnswers(service, preferred)) return preferred
-  return profiles.find((profile) => hasAnswers(service, profile.id))?.id ?? profiles[0]?.id ?? 'off'
-}
-
 function domainCount(service: HostsService): number {
   return service.kind === 'hosts'
     ? (service.entries?.length ?? 0)
@@ -95,14 +85,26 @@ const Hosts: React.FC = () => {
   const [busyAction, setBusyAction] = useState<string | null>(null)
   const [search, setSearch] = useState('')
 
+  // A slow `hosts:overview` (DoH/probing on the main side) can resolve after
+  // the user navigated away; never write that stale snapshot into a dead tree.
+  const mountedRef = useRef(true)
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+    }
+  }, [])
+
   const reload = useCallback(async (): Promise<void> => {
     try {
-      setOverview(await hostsGetOverview())
+      const next = await hostsGetOverview()
+      if (!mountedRef.current) return
+      setOverview(next)
       setError(null)
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      if (mountedRef.current) setError(e instanceof Error ? e.message : String(e))
     } finally {
-      setLoading(false)
+      if (mountedRef.current) setLoading(false)
     }
   }, [])
 
@@ -173,8 +175,14 @@ const Hosts: React.FC = () => {
     setBusyAction('dns')
     try {
       const result = await hostsFlushDns()
-      if (result.ok) toast.success(result.message)
-      else toast.warning(result.message)
+      // Newer main builds may attach PWA/runtime diagnostics; surface them
+      // next to the manual flush result (automatic flushes stay silent).
+      const extra = [result.pwa, result.runtime].filter(Boolean).join(' · ')
+      if (result.ok) {
+        toast.success(result.message, { description: extra || undefined })
+      } else {
+        toast.warning(result.message, { description: extra || undefined })
+      }
     } catch (e) {
       toast.error('Не удалось сбросить DNS-кэш', {
         description: e instanceof Error ? e.message : String(e)
@@ -247,6 +255,11 @@ const Hosts: React.FC = () => {
   const autoDisabledCount = state?.restoreSelection
     ? Object.keys(state.restoreSelection).length
     : 0
+  // C4: the state file was corrupt and was rebuilt from the managed block.
+  // `readWarning` is the softer case (file unreadable this time, saved
+  // settings are shown) and must stay visible instead of silently reverting.
+  const recovery = overview?.recovery ?? status?.recovery
+  const readWarning = status?.readWarning
 
   const visibleSections = useMemo(() => {
     if (!catalog) return []
@@ -386,6 +399,41 @@ const Hosts: React.FC = () => {
             </div>
           </CardContent>
         </Card>
+
+        {recovery?.recovered && (
+          <Card className="border-amber-500/40 bg-amber-500/5">
+            <CardContent className="pt-4">
+              <div className="flex items-center gap-2 text-sm font-medium">
+                <AlertTriangle className="h-4 w-4 text-amber-400" />
+                Состояние hosts восстановлено по файлу hosts
+              </div>
+              <div className="mt-0.5 text-[11px] leading-relaxed text-muted-foreground">
+                {recovery.warning ??
+                  'Файл hosts-state.json был повреждён. Выбор сервисов восстановлен по управляемому блоку в hosts.'}
+                {recovery.corruptPath ? (
+                  <>
+                    {' '}Повреждённый файл сохранён:{' '}
+                    <code className="break-all text-[11px]">{recovery.corruptPath}</code>
+                  </>
+                ) : null}
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
+        {readWarning && (
+          <Card className="border-amber-500/40 bg-amber-500/5">
+            <CardContent className="pt-4">
+              <div className="flex items-center gap-2 text-sm font-medium">
+                <AlertTriangle className="h-4 w-4 text-amber-400" />
+                Не удалось прочитать файл hosts
+              </div>
+              <div className="mt-0.5 text-[11px] leading-relaxed text-muted-foreground">
+                {readWarning} Показаны сохранённые настройки; файл hosts не изменялся.
+              </div>
+            </CardContent>
+          </Card>
+        )}
 
         {legacyPresent && (
           <Card className="border-amber-500/40 bg-amber-500/5">
@@ -565,8 +613,14 @@ const Hosts: React.FC = () => {
                           : 'hosts'
                       const busy = busyService === service.id
                       const disabled = controlsLocked || busy
-                      const profileOptions = profiles.filter((profile) =>
-                        hasAnswers(service, profile.id)
+                      // The current value is always part of the list (stored
+                      // profile without answers, or 'off'), otherwise the
+                      // browser would display the first option instead of the
+                      // real selection (R21).
+                      const profileOptions = profileOptionsFor(
+                        service,
+                        profiles,
+                        currentProfile
                       )
                       return (
                         <div
@@ -609,7 +663,7 @@ const Hosts: React.FC = () => {
                                   !on && 'opacity-60'
                                 )}
                               >
-                                {(profileOptions.length > 0 ? profileOptions : profiles).map(
+                                {profileOptions.map(
                                   (profile) => (
                                     <option key={profile.id} value={profile.id}>
                                       {profile.name}

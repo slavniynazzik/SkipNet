@@ -5,6 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@renderer/components/u
 import { Button } from '@renderer/components/ui/button'
 import { Switch } from '@renderer/components/ui/switch'
 import { useAppConfig } from '@renderer/hooks/use-app-config'
+import { wallpaperPatch } from '@renderer/lib/config-patch'
 import { cn } from '@renderer/lib/utils'
 import {
   wallpaperListWorkshop,
@@ -55,9 +56,11 @@ const WallpaperCard: React.FC = () => {
     }
   }, [configKey])
 
-  const patch = (next: Partial<WallpaperConfig>): void => {
-    void patchAppConfig({ wallpaper: { ...wallpaper, ...next } })
-  }
+  // Leaf-only patch: `next` carries just the changed wallpaper fields, so a
+  // concurrent write (e.g. the main process resolving a different source)
+  // is not rolled back by a stale full-object spread.
+  const patch = (next: Partial<WallpaperConfig>): Promise<boolean> =>
+    patchAppConfig(wallpaperPatch(next))
 
   // The list is cached for 20 s in the main process; only the explicit
   // «Обновить список» button forces a rescan of the Steam libraries.
@@ -93,8 +96,8 @@ const WallpaperCard: React.FC = () => {
     try {
       const result = await wallpaperPick()
       if (!result.path) return
-      patch({ enabled: true, source, path: result.path })
-      toast.success('Обои выбраны', { description: result.name })
+      const saved = await patch({ enabled: true, source, path: result.path })
+      if (saved) toast.success('Обои выбраны', { description: result.name })
     } catch (e) {
       toast.error('Не удалось выбрать файл', {
         description: e instanceof Error ? e.message : String(e)
@@ -131,7 +134,7 @@ const WallpaperCard: React.FC = () => {
           </div>
           <Switch
             checked={wallpaper.enabled}
-            onCheckedChange={(enabled) => patch({ enabled })}
+            onCheckedChange={(enabled) => { void patch({ enabled }) }}
           />
         </div>
 
@@ -143,7 +146,7 @@ const WallpaperCard: React.FC = () => {
                   key={value}
                   size="sm"
                   variant={effectiveSource === value ? 'default' : 'outline'}
-                  onClick={() => patch({ source: value })}
+                  onClick={() => { void patch({ source: value }) }}
                 >
                   <Icon className="h-3.5 w-3.5" />
                   {label}
@@ -201,7 +204,7 @@ const WallpaperCard: React.FC = () => {
 
                 <select
                   value={wallpaper.workshopId ?? ''}
-                  onChange={(e) => patch({ workshopId: e.target.value || undefined })}
+                  onChange={(e) => { void patch({ workshopId: e.target.value || undefined }) }}
                   className={cn(
                     'h-9 w-full rounded-xl border border-stroke bg-card/50 px-3 text-sm',
                     'outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-stroke'
@@ -241,7 +244,7 @@ const WallpaperCard: React.FC = () => {
                 min={10}
                 max={100}
                 suffix="%"
-                onCommit={(value) => patch({ opacity: value })}
+                onCommit={(value) => { void patch({ opacity: value }) }}
               />
               <RangeField
                 label="Размытие"
@@ -249,7 +252,7 @@ const WallpaperCard: React.FC = () => {
                 min={0}
                 max={32}
                 suffix=" px"
-                onCommit={(value) => patch({ blur: value })}
+                onCommit={(value) => { void patch({ blur: value }) }}
               />
               <RangeField
                 label="Затемнение"
@@ -257,7 +260,7 @@ const WallpaperCard: React.FC = () => {
                 min={0}
                 max={90}
                 suffix="%"
-                onCommit={(value) => patch({ dim: value })}
+                onCommit={(value) => { void patch({ dim: value }) }}
               />
             </div>
 

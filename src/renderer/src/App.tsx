@@ -58,7 +58,9 @@ const App: React.FC = () => {
   }, [])
 
   useEffect(() => {
-    setNativeTheme(appTheme)
+    void setNativeTheme(appTheme).catch(() => {
+      /* visual sync only; the DOM theme from next-themes still applies */
+    })
     setTheme(appTheme)
   }, [appTheme, setTheme])
 

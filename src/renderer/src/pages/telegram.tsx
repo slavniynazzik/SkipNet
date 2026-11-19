@@ -4,10 +4,12 @@ import { useTgwsStore } from '@renderer/store/tgws-store'
 import {
   tgwsGetLink, tgwsStart, tgwsStop, tgwsRestart,
   writeClipboard, openTelegramLink,
-  tgwsCheckUpdate, tgwsInstallUpdate, tgwsDismissUpdate,
-  type TgwsUpdateInfo
+  tgwsInstallUpdate
 } from '@renderer/utils/ipc'
 import { useAppConfig } from '@renderer/hooks/use-app-config'
+import { useUpdateCheck } from '@renderer/hooks/use-update-check'
+import { tgwsPatch } from '@renderer/lib/config-patch'
+import { updateBannerVisible } from '@renderer/lib/update-check'
 import { Button } from '@renderer/components/ui/button'
 import { Input } from '@renderer/components/ui/input'
 import { Label } from '@renderer/components/ui/label'
@@ -54,7 +56,9 @@ const TelegramPage: React.FC = () => {
     setSecretDraft(tgws?.secret ?? '')
   }, [tgws?.secret])
 
-  const commitPort = (): void => {
+  // A failed patch is reported once by `patchAppConfig`; the draft snaps back
+  // to the persisted value so the input never shows an unsaved setting.
+  const commitPort = async (): Promise<void> => {
     const parsed = Number(portDraft)
     if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65535) {
       setPortDraft(String(tgws?.port ?? 1443))
@@ -62,11 +66,12 @@ const TelegramPage: React.FC = () => {
     }
     setPortDraft(String(parsed))
     if (parsed !== (tgws?.port ?? 1443)) {
-      void patchAppConfig({ tgws: { port: parsed } as TgwsConfig })
+      const ok = await patchAppConfig(tgwsPatch({ port: parsed }))
+      if (!ok) setPortDraft(String(tgws?.port ?? 1443))
     }
   }
 
-  const commitHost = (): void => {
+  const commitHost = async (): Promise<void> => {
     const value = hostDraft.trim()
     if (!value) {
       setHostDraft(tgws?.host ?? '')
@@ -74,11 +79,12 @@ const TelegramPage: React.FC = () => {
     }
     setHostDraft(value)
     if (value !== (tgws?.host ?? '')) {
-      void patchAppConfig({ tgws: { host: value } as TgwsConfig })
+      const ok = await patchAppConfig(tgwsPatch({ host: value }))
+      if (!ok) setHostDraft(tgws?.host ?? '')
     }
   }
 
-  const commitSecret = (): void => {
+  const commitSecret = async (): Promise<void> => {
     const value = secretDraft.trim()
     if (!/^[0-9a-fA-F]{32}$/.test(value)) {
       // The main process regenerates anything that is not 32 hex chars on
@@ -91,12 +97,25 @@ const TelegramPage: React.FC = () => {
     }
     setSecretDraft(value)
     if (value !== (tgws?.secret ?? '')) {
-      void patchAppConfig({ tgws: { secret: value } as TgwsConfig })
+      const ok = await patchAppConfig(tgwsPatch({ secret: value }))
+      if (!ok) setSecretDraft(tgws?.secret ?? '')
     }
   }
 
+  // The guard matters after "сменить ключ": the pre-rotation request resolves
+  // later with the old link and used to overwrite the freshly generated one.
   useEffect(() => {
-    tgwsGetLink().then(setLink).catch(() => setLink(''))
+    let cancelled = false
+    tgwsGetLink()
+      .then((value) => {
+        if (!cancelled) setLink(value)
+      })
+      .catch(() => {
+        if (!cancelled) setLink('')
+      })
+    return () => {
+      cancelled = true
+    }
   }, [tgws?.host, tgws?.port, tgws?.secret, status.state])
 
   const running = status.state === 'running'
@@ -104,16 +123,12 @@ const TelegramPage: React.FC = () => {
   // so an install during startup does not leave it switched off afterwards.
   const restartAfterMutation = running || status.state === 'starting'
 
-  // ---- Auto-update banner
-  const [updateInfo, setUpdateInfo] = useState<TgwsUpdateInfo | null>(null)
-  const [installing, setInstalling] = useState(false)
+  // ---- Auto-update banner (shared, cached across pages)
+  const updateCheck = useUpdateCheck('tgws')
+  const updateInfo = updateCheck.info
+  const showBanner = updateBannerVisible(updateInfo)
   const installingRef = useRef(false)
-
-  useEffect(() => {
-    tgwsCheckUpdate(false).then(setUpdateInfo).catch(() => setUpdateInfo(null))
-  }, [])
-
-  const showBanner = !!updateInfo && updateInfo.hasUpdate && !updateInfo.dismissed && !!updateInfo.tag
+  const [installing, setInstalling] = useState(false)
 
   const installUpdate = async (): Promise<void> => {
     if (installingRef.current || !updateInfo?.tag) return
@@ -133,9 +148,13 @@ const TelegramPage: React.FC = () => {
         // power-on disc, so success feedback across the app is one colour.
         style: POWER_ON_TOAST_STYLE
       })
-      // Re-check so the banner disappears immediately.
-      const fresh = await tgwsCheckUpdate(true).catch(() => null)
-      setUpdateInfo(fresh)
+      // Re-check so the banner disappears immediately. A failed re-check must
+      // not turn a successful install into an error toast.
+      try {
+        await updateCheck.check()
+      } catch {
+        /* banner refreshes on the next automatic check */
+      }
       // If the proxy was running we already stopped it server-side to free
       // the .exe write lock; restart it so the user doesn't have to.
       if (restartAfterMutation) {
@@ -150,21 +169,17 @@ const TelegramPage: React.FC = () => {
     }
   }
 
+  // The hook only hides the banner after main persisted the dismissal and
+  // shows its own error toast when the write fails (R12).
   const dismissUpdate = (): void => {
-    if (!updateInfo?.latest) return
-    void tgwsDismissUpdate(updateInfo.latest).catch(() => void 0)
-    setUpdateInfo({ ...updateInfo, dismissed: true })
+    void updateCheck.dismiss()
   }
 
   // Manual "check now" — the automatic check stays silent on network errors,
   // so users need an explicit action that reports what happened.
-  const [checking, setChecking] = useState(false)
   const checkNow = async (): Promise<void> => {
-    if (checking) return
-    setChecking(true)
     try {
-      const fresh = await tgwsCheckUpdate(true)
-      setUpdateInfo(fresh.hasUpdate ? { ...fresh, dismissed: false } : fresh)
+      const fresh = await updateCheck.check()
       if (fresh.hasUpdate && fresh.tag) {
         toast.info(`Доступно обновление TgWsProxy v${fresh.latest}`, {
           description: 'Нажмите «Обновить» в баннере выше.'
@@ -179,8 +194,6 @@ const TelegramPage: React.FC = () => {
       toast.error('Не удалось проверить обновления', {
         description: e instanceof Error ? e.message : String(e)
       })
-    } finally {
-      setChecking(false)
     }
   }
 
@@ -192,7 +205,8 @@ const TelegramPage: React.FC = () => {
     setRegenerating(true)
     try {
       const newSecret = generateTgwsSecret()
-      await patchAppConfig({ tgws: { ...tgws, secret: newSecret } })
+      const ok = await patchAppConfig(tgwsPatch({ secret: newSecret }))
+      if (!ok) return
       try {
         const updated = await tgwsGetLink()
         setLink(updated)
@@ -200,7 +214,16 @@ const TelegramPage: React.FC = () => {
         setLink('')
       }
       if (restartAfterMutation) {
-        await tgwsRestart().catch(() => void 0)
+        try {
+          await tgwsRestart()
+        } catch (e) {
+          // The key is already persisted; the proxy still runs with the old
+          // one until the user restarts it, so don't claim full success.
+          toast.error('Ключ изменён, но прокси не перезапустился', {
+            description: e instanceof Error ? e.message : String(e)
+          })
+          return
+        }
       }
       toast.success('Ключ и ссылка изменены', { style: POWER_ON_TOAST_STYLE })
     } finally {
@@ -255,7 +278,7 @@ const TelegramPage: React.FC = () => {
           version={tgws?.installedVersion ?? updateInfo?.installed ?? BUNDLED_TGWS_VERSION}
           status={status}
           disabled={installing}
-          onToggle={(v) => (v ? tgwsStart() : tgwsStop()).catch(() => void 0)}
+          onToggle={(v) => (v ? tgwsStart() : tgwsStop())}
           footer={installing ? 'Устанавливаем обновление…' : running ? null : 'Нажмите для запуска'}
         />
 
@@ -270,10 +293,10 @@ const TelegramPage: React.FC = () => {
           <Button
             variant="ghost"
             size="sm"
-            disabled={checking}
+            disabled={updateCheck.checking}
             onClick={() => { void checkNow() }}
           >
-            {checking
+            {updateCheck.checking
               ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
               : <RefreshCw className="h-3.5 w-3.5" />}
             Проверить
@@ -292,8 +315,14 @@ const TelegramPage: React.FC = () => {
               variant="outline"
               onClick={async () => {
                 if (!link) return
-                await writeClipboard(link)
-                toast.success('Ссылка скопирована', { style: POWER_ON_TOAST_STYLE })
+                try {
+                  await writeClipboard(link)
+                  toast.success('Ссылка скопирована', { style: POWER_ON_TOAST_STYLE })
+                } catch (e) {
+                  toast.error('Не удалось скопировать ссылку', {
+                    description: e instanceof Error ? e.message : String(e)
+                  })
+                }
               }}
               title="Копировать ссылку"
             >
@@ -302,7 +331,14 @@ const TelegramPage: React.FC = () => {
             <Button
               size="icon-sm"
               variant="outline"
-              onClick={() => link && openTelegramLink(link).catch(() => void 0)}
+              onClick={() => {
+                if (!link) return
+                void openTelegramLink(link).catch((e: unknown) => {
+                  toast.error('Не удалось открыть Telegram', {
+                    description: e instanceof Error ? e.message : String(e)
+                  })
+                })
+              }}
               title="Открыть в Telegram"
             >
               <ExternalLink className="size-4" />
@@ -346,7 +382,7 @@ const TelegramPage: React.FC = () => {
             <Input
               value={hostDraft}
               onChange={(e) => setHostDraft(e.target.value)}
-              onBlur={commitHost}
+              onBlur={() => { void commitHost() }}
               onKeyDown={(e) => {
                 if (e.key === 'Enter') e.currentTarget.blur()
               }}
@@ -359,7 +395,7 @@ const TelegramPage: React.FC = () => {
               type="number"
               value={portDraft}
               onChange={(e) => setPortDraft(e.target.value)}
-              onBlur={commitPort}
+              onBlur={() => { void commitPort() }}
               onKeyDown={(e) => {
                 if (e.key === 'Enter') e.currentTarget.blur()
               }}
@@ -372,7 +408,7 @@ const TelegramPage: React.FC = () => {
             <Input
               value={secretDraft}
               onChange={(e) => setSecretDraft(e.target.value)}
-              onBlur={commitSecret}
+              onBlur={() => { void commitSecret() }}
               onKeyDown={(e) => {
                 if (e.key === 'Enter') e.currentTarget.blur()
               }}

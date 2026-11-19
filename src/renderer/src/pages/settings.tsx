@@ -2,17 +2,13 @@ import { useEffect, useRef, useState } from 'react'
 import { toast } from 'sonner'
 import { Loader2, RefreshCw } from 'lucide-react'
 import { useAppConfig } from '@renderer/hooks/use-app-config'
+import { useUpdateCheck } from '@renderer/hooks/use-update-check'
+import { tgwsPatch, zapretPatch } from '@renderer/lib/config-patch'
 import { Card, CardContent, CardHeader, CardTitle } from '@renderer/components/ui/card'
 import { Label } from '@renderer/components/ui/label'
 import { Switch } from '@renderer/components/ui/switch'
 import { Button } from '@renderer/components/ui/button'
-import {
-  appCheckUpdate,
-  appRelaunch,
-  getAppVersion,
-  tgwsCheckUpdate,
-  zapretCheckUpdate
-} from '@renderer/utils/ipc'
+import { appRelaunch, getAppVersion } from '@renderer/utils/ipc'
 import BasePage from '@renderer/components/base/base-page'
 import WallpaperCard from '@renderer/components/wallpaper-card'
 import {
@@ -29,12 +25,25 @@ const themeLabels: Record<AppTheme, string> = {
 
 const Settings: React.FC = () => {
   const { appConfig, patchAppConfig } = useAppConfig()
+  const appUpdates = useUpdateCheck('app')
+  const tgwsUpdates = useUpdateCheck('tgws')
+  const zapretUpdates = useUpdateCheck('zapret')
   const [checkingUpdates, setCheckingUpdates] = useState(false)
   const checkingRef = useRef(false)
   const [appVersion, setAppVersion] = useState<string | null>(null)
 
   useEffect(() => {
-    getAppVersion().then(setAppVersion).catch(() => setAppVersion(null))
+    let cancelled = false
+    getAppVersion()
+      .then((value) => {
+        if (!cancelled) setAppVersion(value)
+      })
+      .catch(() => {
+        if (!cancelled) setAppVersion(null)
+      })
+    return () => {
+      cancelled = true
+    }
   }, [])
 
   const checkUpdates = async (): Promise<void> => {
@@ -42,10 +51,12 @@ const Settings: React.FC = () => {
     checkingRef.current = true
     setCheckingUpdates(true)
     try {
+      // Manual checks work even when automatic ones are switched off; they
+      // force a fresh IPC round-trip and share the result with the banners.
       const [tgws, zapret, app] = await Promise.allSettled([
-        tgwsCheckUpdate(true),
-        zapretCheckUpdate(true),
-        appCheckUpdate(true)
+        tgwsUpdates.check(),
+        zapretUpdates.check(),
+        appUpdates.check()
       ])
       const ok: string[] = []
       const failed: string[] = []
@@ -117,7 +128,7 @@ const Settings: React.FC = () => {
                   key={theme}
                   size="sm"
                   variant={appConfig?.appTheme === theme ? 'default' : 'outline'}
-                  onClick={() => patchAppConfig({ appTheme: theme })}
+                  onClick={() => { void patchAppConfig({ appTheme: theme }) }}
                 >
                   {themeLabels[theme]}
                 </Button>
@@ -138,14 +149,14 @@ const Settings: React.FC = () => {
             <Label className="text-sm">Запускать при входе в Windows</Label>
             <Switch
               checked={appConfig?.autoLaunch ?? false}
-              onCheckedChange={(v) => patchAppConfig({ autoLaunch: v })}
+              onCheckedChange={(v) => { void patchAppConfig({ autoLaunch: v }) }}
             />
           </div>
           <div className="flex items-center justify-between">
             <Label className="text-sm">Тихий старт (без окна)</Label>
             <Switch
               checked={appConfig?.silentStart ?? false}
-              onCheckedChange={(v) => patchAppConfig({ silentStart: v })}
+              onCheckedChange={(v) => { void patchAppConfig({ silentStart: v }) }}
             />
           </div>
           <div className="flex items-center justify-between">
@@ -153,9 +164,7 @@ const Settings: React.FC = () => {
             <Switch
               checked={appConfig?.tgws?.autoStart ?? false}
               disabled={!appConfig?.tgws}
-              onCheckedChange={(v) =>
-                patchAppConfig({ tgws: { ...(appConfig?.tgws as TgwsConfig), autoStart: v } })
-              }
+              onCheckedChange={(v) => { void patchAppConfig(tgwsPatch({ autoStart: v })) }}
             />
           </div>
           <div className="flex items-center justify-between">
@@ -163,9 +172,7 @@ const Settings: React.FC = () => {
             <Switch
               checked={appConfig?.zapret?.autoStart ?? false}
               disabled={!appConfig?.zapret}
-              onCheckedChange={(v) =>
-                patchAppConfig({ zapret: { ...(appConfig?.zapret as ZapretConfig), autoStart: v } })
-              }
+              onCheckedChange={(v) => { void patchAppConfig(zapretPatch({ autoStart: v })) }}
             />
           </div>
         </CardContent>
@@ -186,7 +193,7 @@ const Settings: React.FC = () => {
             </div>
             <Switch
               checked={!(appConfig?.disableTray ?? false)}
-              onCheckedChange={(v) => patchAppConfig({ disableTray: !v })}
+              onCheckedChange={(v) => { void patchAppConfig({ disableTray: !v }) }}
             />
           </div>
           <div className="flex items-center justify-between">
@@ -199,7 +206,7 @@ const Settings: React.FC = () => {
             </div>
             <Switch
               checked={appConfig?.hideTaskbarIcon ?? false}
-              onCheckedChange={(v) => patchAppConfig({ hideTaskbarIcon: v })}
+              onCheckedChange={(v) => { void patchAppConfig({ hideTaskbarIcon: v }) }}
             />
           </div>
         </CardContent>
@@ -219,7 +226,7 @@ const Settings: React.FC = () => {
             </div>
             <Switch
               checked={appConfig?.autoCheckUpdate ?? true}
-              onCheckedChange={(v) => patchAppConfig({ autoCheckUpdate: v })}
+              onCheckedChange={(v) => { void patchAppConfig({ autoCheckUpdate: v }) }}
             />
           </div>
           <div className="flex items-center justify-between">
@@ -274,10 +281,22 @@ const Settings: React.FC = () => {
             <Label className="text-sm">Отключить аппаратное ускорение (нужен перезапуск)</Label>
             <Switch
               checked={appConfig?.disableGPU ?? false}
-              onCheckedChange={(v) => patchAppConfig({ disableGPU: v })}
+              onCheckedChange={(v) => { void patchAppConfig({ disableGPU: v }) }}
             />
           </div>
-          <Button size="sm" variant="outline" onClick={() => appRelaunch()}>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={async () => {
+              try {
+                await appRelaunch()
+              } catch (e) {
+                toast.error('Не удалось перезапустить приложение', {
+                  description: e instanceof Error ? e.message : String(e)
+                })
+              }
+            }}
+          >
             Перезапустить приложение
           </Button>
         </CardContent>
