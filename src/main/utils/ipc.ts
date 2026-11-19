@@ -356,7 +356,7 @@ export function registerIpcMainHandlers(): void {
   ipcMain.handle('hosts:disableAll', h(() => disableAllHostsServices()))
   ipcMain.handle('hosts:setAdobe', h((enabled) => setHostsAdobeBlock(Boolean(enabled))))
   ipcMain.handle('hosts:importLegacy', h(() => importLegacyHostsBlocks()))
-  ipcMain.handle('hosts:apply', h(() => reapplyHostsState()))
+  ipcMain.handle('hosts:apply', h((force) => reapplyHostsState(force === true)))
   ipcMain.handle('hosts:restoreLatest', h(() => restoreLatestHostsBackup()))
   ipcMain.handle('hosts:openFile', h(() => openHostsFile()))
   ipcMain.handle('hosts:flushDns', h(() => flushHostsDns()))

@@ -9,6 +9,7 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { mkdir, rename, unlink, writeFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
+import { isIP } from 'node:net'
 import path from 'node:path'
 import { dataDir } from '../utils/dirs'
 
@@ -86,12 +87,24 @@ export function normalizeHostsState(input: unknown, catalog: HostsCatalog): Host
     }
   }
 
+  const skippedIps = Array.isArray(raw.skippedIps)
+    ? [
+        ...new Set(
+          raw.skippedIps
+            .filter((value): value is string => typeof value === 'string')
+            .map((value) => value.trim())
+            .filter((value) => value.length > 0 && isIP(value) !== 0)
+        )
+      ]
+    : []
+
   return {
     version: 1,
     catalogVersion: catalog.meta.version,
     selection,
     defaultDnsProfile: defaultProfile,
     adobeBlock: raw.adobeBlock === true,
+    skippedIps,
     appliedAt: typeof raw.appliedAt === 'string' ? raw.appliedAt : undefined,
     renderedHash: typeof raw.renderedHash === 'string' ? raw.renderedHash : undefined
   }

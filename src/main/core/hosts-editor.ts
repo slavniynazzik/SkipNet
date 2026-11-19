@@ -52,6 +52,7 @@ import {
   parseLegacyZapretGui,
   renderAdobeBlock,
   renderManagedBlock,
+  selectedEntries,
   validateHostsFileContent,
   ADOBE_BLOCK_END,
   ADOBE_BLOCK_START,
@@ -59,6 +60,7 @@ import {
   EDITOR_BLOCK_START,
   type RenderedHostsBlock
 } from './hosts-render'
+import { probeIps } from './hosts-health'
 
 const BACKUPS_DIR = 'hosts-backups'
 const MAX_BACKUPS = 20
@@ -276,12 +278,86 @@ interface ApplyOutcome {
   managed: RenderedHostsBlock
   changed: boolean
   flush: { ok: boolean; message: string }
+  warnings: string[]
+}
+
+/**
+ * Probe the addresses the current selection would write and drop the dead
+ * ones. A service whose every address is unreachable is switched off: keeping
+ * it enabled would only produce TCP timeouts and a "hosts is broken" feeling.
+ */
+async function planReachableState(
+  catalog: HostsCatalog,
+  state: HostsState,
+  force = false
+): Promise<{ state: HostsState; warnings: string[] }> {
+  const selectionOf = (service: HostsService): string | null => {
+    const value = state.selection[service.id]
+    if (!value || value === 'off') return null
+    if (service.kind === 'hosts') return value === 'hosts' ? 'hosts' : null
+    return value === 'hosts' ? state.defaultDnsProfile || null : value
+  }
+
+  const perService: Array<{ service: HostsService; ips: string[] }> = []
+  const all = new Set<string>()
+  for (const service of catalog.services) {
+    const selection = selectionOf(service)
+    if (!selection) continue
+    const ips = [
+      ...new Set(selectedEntries(service, selection).flatMap((entry) => entry.ips))
+    ]
+    if (ips.length === 0) continue
+    perService.push({ service, ips })
+    for (const ip of ips) all.add(ip)
+  }
+
+  if (all.size === 0) {
+    return { state: { ...state, skippedIps: [] }, warnings: [] }
+  }
+
+  // Distinguish "the pins are dead" from "this machine has no internet at
+  // all". Without a control a transient outage would switch every service off.
+  const control = await probeIps(['1.1.1.1', '8.8.8.8'], { force })
+  if (![...control.values()].some(Boolean)) {
+    return {
+      state,
+      warnings: [
+        'Не удалось проверить адреса: нет доступа в интернет. Настройки не изменены.'
+      ]
+    }
+  }
+
+  const reachable = await probeIps([...all], { force })
+  const skipped = [...all].filter((ip) => reachable.get(ip) === false)
+  const skippedSet = new Set(skipped)
+  const selection = { ...state.selection }
+  const disabled: string[] = []
+
+  for (const item of perService) {
+    const alive = item.ips.filter((ip) => !skippedSet.has(ip)).length
+    if (alive === 0) {
+      selection[item.service.id] = 'off'
+      disabled.push(item.service.name)
+    }
+  }
+
+  const warnings: string[] = []
+  if (disabled.length > 0) {
+    const listed = disabled.slice(0, 3).join(', ')
+    const rest = disabled.length > 3 ? ` и ещё ${disabled.length - 3}` : ''
+    warnings.push(
+      `Адреса недоступны: ${listed}${rest}. Эти сервисы выключены — ` +
+        'выберите другой DNS-профиль или обновите каталог.'
+    )
+  }
+
+  return { state: { ...state, selection, skippedIps: skipped }, warnings }
 }
 
 async function applyCandidate(
   catalog: HostsCatalog,
   candidate: HostsState,
-  options: { allowLegacy?: boolean } = {}
+  options: { allowLegacy?: boolean; forceProbe?: boolean } = {}
 ): Promise<ApplyOutcome> {
   const original = readHostsRawStrict()
   const previousState = loadHostsState(catalog)
@@ -295,22 +371,26 @@ async function applyCandidate(
         'Сначала импортируйте его на этой странице.'
     )
   }
-  const managed = renderManagedBlock(catalog, candidate)
+
+  // Health check happens before rendering so dead pins never reach the file.
+  const planned = await planReachableState(catalog, candidate, options.forceProbe === true)
+  const effective = planned.state
+  const managed = renderManagedBlock(catalog, effective)
   const adobeBlock = renderAdobeBlock(adobe.hosts)
   const nextContent = buildHostsContent(
     original,
     managed,
     adobeBlock,
-    candidate.adobeBlock,
+    effective.adobeBlock,
     adobe.set
   )
   const nextHash = hashHostsContent(nextContent)
   const changed = nextHash !== hashHostsContent(original)
 
   const finalState: HostsState = {
-    ...candidate,
+    ...effective,
     catalogVersion: catalog.meta.version,
-    selection: { ...candidate.selection },
+    selection: { ...effective.selection },
     appliedAt: new Date().toISOString(),
     renderedHash: nextHash
   }
@@ -321,7 +401,8 @@ async function applyCandidate(
       state: finalState,
       managed,
       changed: false,
-      flush: { ok: true, message: 'Файл hosts не изменился.' }
+      flush: { ok: true, message: 'Файл hosts не изменился.' },
+      warnings: planned.warnings
     }
   }
 
@@ -350,7 +431,13 @@ async function applyCandidate(
 
   await saveHostsState(finalState)
   const flush = flushDns()
-  return { state: finalState, managed, changed: true, flush }
+  return {
+    state: finalState,
+    managed,
+    changed: true,
+    flush,
+    warnings: planned.warnings
+  }
 }
 
 function operationResult(
@@ -362,7 +449,7 @@ function operationResult(
   return {
     ...overview(catalog, source, outcome.state),
     message,
-    warnings: outcome.managed.warnings
+    warnings: [...outcome.warnings, ...outcome.managed.warnings]
   }
 }
 
@@ -507,7 +594,8 @@ export function importLegacyHostsBlocks(): Promise<HostsOperationResult> {
           state,
           managed: renderManagedBlock(catalog, state),
           changed: false,
-          flush: { ok: true, message: 'Нечего импортировать.' }
+          flush: { ok: true, message: 'Нечего импортировать.' },
+          warnings: []
         },
         'Блок ZapretGUI не найден'
       )
@@ -543,11 +631,11 @@ export function importLegacyHostsBlocks(): Promise<HostsOperationResult> {
   })
 }
 
-export function reapplyHostsState(): Promise<HostsOperationResult> {
+export function reapplyHostsState(forceProbe = false): Promise<HostsOperationResult> {
   return withHostsLock(async () => {
     const { catalog, source } = getHostsCatalog()
     const state = loadEffectiveState(catalog)
-    const outcome = await applyCandidate(catalog, state)
+    const outcome = await applyCandidate(catalog, state, { forceProbe })
     return operationResult(catalog, source, outcome, 'Настройки hosts применены')
   })
 }

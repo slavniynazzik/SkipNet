@@ -256,7 +256,8 @@ export const hostsSetAdobe = (enabled: boolean): Promise<HostsOperationResult> =
   invoke('hosts:setAdobe', enabled)
 export const hostsImportLegacy = (): Promise<HostsOperationResult> =>
   invoke('hosts:importLegacy')
-export const hostsApply = (): Promise<HostsOperationResult> => invoke('hosts:apply')
+export const hostsApply = (force = false): Promise<HostsOperationResult> =>
+  invoke('hosts:apply', force)
 export const hostsRestoreLatest = (): Promise<HostsOperationResult> =>
   invoke('hosts:restoreLatest')
 export const hostsOpenFile = (): Promise<void> => invoke('hosts:openFile')

@@ -10,6 +10,7 @@ import {
   RefreshCw,
   RotateCcw,
   Search,
+  ShieldCheck,
   ShieldOff
 } from 'lucide-react'
 import BasePage from '@renderer/components/base/base-page'
@@ -238,6 +239,7 @@ const Hosts: React.FC = () => {
   const managedLines = status?.managedLines ?? 0
   const catalogVersion = catalog?.meta.version ?? ''
   const checkedAt = catalog?.meta.checkedAt
+  const skippedCount = state?.skippedIps?.length ?? 0
 
   const visibleSections = useMemo(() => {
     if (!catalog) return []
@@ -266,10 +268,23 @@ const Hosts: React.FC = () => {
                 <div className="mt-1 text-[11px] text-muted-foreground">
                   строк SkipNet в файле: {managedLines}
                   {catalogVersion ? ` · каталог ${catalogVersion}` : ''}
-                  {checkedAt ? ` · адреса проверены ${formatWhen(checkedAt)}` : ''}
+                  {checkedAt ? ` · каталог обновлён ${formatWhen(checkedAt)}` : ''}
+                  {skippedCount > 0 ? ` · пропущено адресов: ${skippedCount}` : ''}
                 </div>
               </div>
               <div className="flex flex-wrap gap-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => { void runAction('recheck', () => hostsApply(true)) }}
+                  disabled={uiBusy}
+                  title="Проверить доступность адресов и переписать hosts без недоступных IP"
+                >
+                  {busyAction === 'recheck'
+                    ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    : <ShieldCheck className="h-3.5 w-3.5" />}
+                  Проверить адреса
+                </Button>
                 <Button size="sm" variant="outline" onClick={openFile}>
                   <FileText className="h-3.5 w-3.5" />
                   Файл hosts
@@ -429,6 +444,31 @@ const Hosts: React.FC = () => {
               </CardContent>
             </Card>
           )}
+
+        {skippedCount > 0 && !legacyPresent && !status?.legacy.skipNet && (
+          <Card className="border-amber-500/40 bg-amber-500/5">
+            <CardContent className="flex flex-wrap items-center justify-between gap-3 pt-4">
+              <div className="min-w-0">
+                <div className="flex items-center gap-2 text-sm font-medium">
+                  <Info className="h-4 w-4 text-amber-400" />
+                  Пропущено недоступных адресов: {skippedCount}
+                </div>
+                <div className="mt-0.5 text-[11px] text-muted-foreground">
+                  Эти IP не отвечают на порту 443 и не записываются в hosts — иначе каждое
+                  соединение ждало бы таймаут. Смените DNS-профиль или обновите каталог.
+                </div>
+              </div>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => { void runAction('recheck', () => hostsApply(true)) }}
+                disabled={uiBusy}
+              >
+                Проверить адреса снова
+              </Button>
+            </CardContent>
+          </Card>
+        )}
 
         {error && (
           <Card className="border-red-500/40">

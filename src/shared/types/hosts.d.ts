@@ -62,6 +62,11 @@ interface HostsState {
   selection: Record<string, HostsSelection>
   defaultDnsProfile: string
   adobeBlock: boolean
+  /**
+   * Addresses that failed the reachability probe at the last apply. They stay
+   * out of the managed block until a later probe succeeds.
+   */
+  skippedIps?: string[]
   appliedAt?: string
   renderedHash?: string
 }

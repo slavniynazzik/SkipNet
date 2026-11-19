@@ -70,13 +70,39 @@ function normalizeSelection(
   return value
 }
 
+export interface SelectedHostsEntry {
+  hostname: string
+  ips: string[]
+}
+
+/** Hostnames and addresses a service would write for the given selection. */
+export function selectedEntries(
+  service: HostsService,
+  selection: string
+): SelectedHostsEntry[] {
+  if (service.kind === 'hosts') {
+    return (service.entries ?? []).map((entry) => ({
+      hostname: entry.hostname,
+      ips: entry.ips
+    }))
+  }
+  return (service.domains ?? []).map((domain) => ({
+    hostname: domain.hostname,
+    ips: domain.answers[selection] ?? []
+  }))
+}
+
 /**
  * Render all enabled services into the managed block. Duplicate
  * `(ip, hostname)` pairs are collapsed; a hostname can legitimately appear
  * under several services, but writing the same pair twice adds no value.
+ *
+ * Addresses listed in `state.skippedIps` are omitted: they failed the
+ * reachability probe and would only add a TCP timeout to every connection.
  */
 export function renderManagedBlock(catalog: HostsCatalog, state: HostsState): RenderedHostsBlock {
   const seen = new Set<string>()
+  const skipped = new Set((state.skippedIps ?? []).map((ip) => ip.toLowerCase()))
   const lines: string[] = []
   const warnings: string[] = []
   let services = 0
@@ -87,28 +113,18 @@ export function renderManagedBlock(catalog: HostsCatalog, state: HostsState): Re
     if (!selection) continue
 
     const serviceLines: string[] = []
-    if (service.kind === 'hosts') {
-      for (const entry of service.entries ?? []) {
-        for (const ip of entry.ips) {
-          const key = `${ip.toLowerCase()} ${entry.hostname}`
-          if (seen.has(key)) continue
-          seen.add(key)
-          serviceLines.push(`${ip} ${entry.hostname}`)
-        }
+    for (const entry of selectedEntries(service, selection)) {
+      if (entry.ips.length === 0) {
+        warnings.push(`${service.name}: нет адресов для профиля ${selection}`)
+        continue
       }
-    } else {
-      for (const domain of service.domains ?? []) {
-        const ips = domain.answers[selection]
-        if (!ips || ips.length === 0) {
-          warnings.push(`${service.name}: нет адресов для профиля ${selection}`)
-          continue
-        }
-        for (const ip of ips) {
-          const key = `${ip.toLowerCase()} ${domain.hostname}`
-          if (seen.has(key)) continue
-          seen.add(key)
-          serviceLines.push(`${ip} ${domain.hostname}`)
-        }
+      const usable = entry.ips.filter((ip) => !skipped.has(ip.toLowerCase()))
+      if (usable.length === 0) continue
+      for (const ip of usable) {
+        const key = `${ip.toLowerCase()} ${entry.hostname}`
+        if (seen.has(key)) continue
+        seen.add(key)
+        serviceLines.push(`${ip} ${entry.hostname}`)
       }
     }
 
