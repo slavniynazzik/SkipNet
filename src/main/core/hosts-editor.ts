@@ -34,6 +34,7 @@ import {
 import {
   defaultHostsState,
   loadHostsState,
+  loadHostsStateRecovering,
   normalizeHostsState,
   saveHostsState
 } from './hosts-state'
@@ -227,13 +228,16 @@ function buildStatus(
 function overview(
   catalog: HostsCatalog,
   source: 'bundled' | 'downloaded',
-  state: HostsState
+  state: HostsState,
+  recovery?: HostsStateRecovery
 ): HostsOverview {
+  const status = buildStatus(readHostsRawStrict(), state, catalog)
   return {
     catalog,
     catalogSource: source,
     state,
-    status: buildStatus(readHostsRawStrict(), state, catalog)
+    status: recovery ? { ...status, recovery } : status,
+    ...(recovery ? { recovery } : {})
   }
 }
 
@@ -241,10 +245,16 @@ function overview(
  * Persisted state plus one safety correction: if the file already contains an
  * Adobe block, keep it enabled instead of deleting it on the first unrelated
  * toggle. A new install has no such block and stays off by default.
+ *
+ * Also the single place where a corrupt `hosts-state.json` is repaired: the
+ * recovery reads the current hosts block, so both callers share one read.
  */
-function loadEffectiveState(catalog: HostsCatalog): HostsState {
-  const state = loadHostsState(catalog)
+async function loadEffectiveState(
+  catalog: HostsCatalog
+): Promise<{ state: HostsState; recovery?: HostsStateRecovery }> {
   const content = readHostsRawStrict()
+  const loaded = await loadHostsStateRecovering(catalog, { hostsContent: content })
+  const state = loaded.state
   const legacy = detectLegacyBlocks(content, adobeData().set)
   let next = state
 
@@ -264,14 +274,14 @@ function loadEffectiveState(catalog: HostsCatalog): HostsState {
     }
   }
   if (legacy.adobe && !next.adobeBlock) next = { ...next, adobeBlock: true }
-  return next
+  return { state: next, recovery: loaded.recovery }
 }
 
 export function getHostsOverview(): Promise<HostsOverview> {
   return withHostsLock(async () => {
     const { catalog, source } = getHostsCatalog()
-    const state = loadEffectiveState(catalog)
-    return overview(catalog, source, state)
+    const { state, recovery } = await loadEffectiveState(catalog)
+    return overview(catalog, source, state, recovery)
   })
 }
 
@@ -281,6 +291,7 @@ interface ApplyOutcome {
   changed: boolean
   flush: { ok: boolean; message: string }
   warnings: string[]
+  recovery?: HostsStateRecovery
 }
 
 /**
@@ -377,7 +388,11 @@ async function planReachableState(
 async function applyCandidate(
   catalog: HostsCatalog,
   candidate: HostsState,
-  options: { allowLegacy?: boolean; forceProbe?: boolean } = {}
+  options: {
+    allowLegacy?: boolean
+    forceProbe?: boolean
+    recovery?: HostsStateRecovery
+  } = {}
 ): Promise<ApplyOutcome> {
   const original = readHostsRawStrict()
   const previousState = loadHostsState(catalog)
@@ -415,6 +430,8 @@ async function applyCandidate(
     renderedHash: nextHash
   }
 
+  const recovery = options.recovery
+
   if (!changed) {
     await saveHostsState(finalState)
     return {
@@ -422,16 +439,34 @@ async function applyCandidate(
       managed,
       changed: false,
       flush: { ok: true, message: 'Файл hosts не изменился.' },
-      warnings: planned.warnings
+      warnings: planned.warnings,
+      recovery
     }
   }
 
   createBackup(original, previousState)
+
+  // Persist the new state *before* touching the hosts file. The backup above
+  // already captured the previous state, so a failed state write aborts here
+  // with hosts untouched; the reverse order (write hosts, then rename state)
+  // could leave the file modified while the UI still showed the old selection
+  // whenever AV held hosts-state.json open.
+  await saveHostsState(finalState)
+
+  const restoreState = async (): Promise<void> => {
+    try {
+      await saveHostsState(previousState)
+    } catch {
+      /* the hosts rollback below is what the user actually sees */
+    }
+  }
+
   const written = writeHostsContent(nextContent)
   if (!written.ok) {
     // A failed direct write can leave the system file truncated before the
     // elevated fallback runs. Always put the original bytes back.
     const rollback = writeHostsContent(original)
+    await restoreState()
     throw new Error(
       `Не удалось записать файл hosts: ${written.error ?? 'неизвестная ошибка'}. ` +
         (rollback.ok
@@ -443,20 +478,21 @@ async function applyCandidate(
   const verify = readHostsRawStrict()
   if (hashHostsContent(verify) !== nextHash) {
     const rollback = writeHostsContent(original)
+    await restoreState()
     throw new Error(
       'Файл hosts записан, но проверка не совпала. ' +
         (rollback.ok ? 'Исходный файл восстановлен.' : 'Автоматический откат не удался.')
     )
   }
 
-  await saveHostsState(finalState)
   const flush = flushDns()
   return {
     state: finalState,
     managed,
     changed: true,
     flush,
-    warnings: planned.warnings
+    warnings: planned.warnings,
+    recovery
   }
 }
 
@@ -467,7 +503,7 @@ function operationResult(
   message: string
 ): HostsOperationResult {
   return {
-    ...overview(catalog, source, outcome.state),
+    ...overview(catalog, source, outcome.state, outcome.recovery),
     message,
     warnings: [...outcome.warnings, ...outcome.managed.warnings]
   }
@@ -493,7 +529,7 @@ export function setHostsServiceSelection(
 ): Promise<HostsOperationResult> {
   return withHostsLock(async () => {
     const { catalog, source } = getHostsCatalog()
-    const state = loadEffectiveState(catalog)
+    const { state, recovery } = await loadEffectiveState(catalog)
     const service = catalog.services.find((item) => item.id === serviceId)
     if (!service) throw new Error(`Сервис ${serviceId} не найден в каталоге`)
 
@@ -515,7 +551,7 @@ export function setHostsServiceSelection(
       selection: { ...state.selection, [serviceId]: normalized },
       restoreSelection
     }
-    const outcome = await applyCandidate(catalog, candidate)
+    const outcome = await applyCandidate(catalog, candidate, { recovery })
     const profileName =
       normalized === 'hosts'
         ? 'Напрямую'
@@ -537,7 +573,7 @@ export function setHostsDnsForAll(profileId: string): Promise<HostsOperationResu
     const profile = catalog.dnsProfiles.find((item) => item.id === profileId)
     if (!profile) throw new Error(`DNS-профиль ${profileId} не найден`)
 
-    const state = loadEffectiveState(catalog)
+    const { state, recovery } = await loadEffectiveState(catalog)
     const selection: Record<string, HostsSelection> = { ...state.selection }
     const kept: string[] = []
     for (const service of catalog.services) {
@@ -555,7 +591,7 @@ export function setHostsDnsForAll(profileId: string): Promise<HostsOperationResu
       defaultDnsProfile: profile.id,
       selection
     }
-    const outcome = await applyCandidate(catalog, candidate)
+    const outcome = await applyCandidate(catalog, candidate, { recovery })
     const keptNote =
       kept.length > 0
         ? ` Без адресов в этом профиле: ${kept.slice(0, 3).join(', ')}${
@@ -574,11 +610,11 @@ export function setHostsDnsForAll(profileId: string): Promise<HostsOperationResu
 export function disableAllHostsServices(): Promise<HostsOperationResult> {
   return withHostsLock(async () => {
     const { catalog, source } = getHostsCatalog()
-    const state = loadEffectiveState(catalog)
+    const { state, recovery } = await loadEffectiveState(catalog)
     const selection: Record<string, HostsSelection> = {}
     for (const service of catalog.services) selection[service.id] = 'off'
     const candidate: HostsState = { ...state, selection, restoreSelection: {} }
-    const outcome = await applyCandidate(catalog, candidate)
+    const outcome = await applyCandidate(catalog, candidate, { recovery })
     return operationResult(catalog, source, outcome, 'Все сервисы выключены')
   })
 }
@@ -586,9 +622,9 @@ export function disableAllHostsServices(): Promise<HostsOperationResult> {
 export function setHostsAdobeBlock(enabled: boolean): Promise<HostsOperationResult> {
   return withHostsLock(async () => {
     const { catalog, source } = getHostsCatalog()
-    const state = loadEffectiveState(catalog)
+    const { state, recovery } = await loadEffectiveState(catalog)
     const candidate: HostsState = { ...state, adobeBlock: enabled }
-    const outcome = await applyCandidate(catalog, candidate)
+    const outcome = await applyCandidate(catalog, candidate, { recovery })
     return operationResult(
       catalog,
       source,
@@ -601,7 +637,7 @@ export function setHostsAdobeBlock(enabled: boolean): Promise<HostsOperationResu
 export function importLegacyHostsBlocks(): Promise<HostsOperationResult> {
   return withHostsLock(async () => {
     const { catalog, source } = getHostsCatalog()
-    const state = loadEffectiveState(catalog)
+    const { state, recovery } = await loadEffectiveState(catalog)
     const content = readHostsRawStrict()
     assertBalancedBlocks(content)
     const adobe = adobeData()
@@ -643,7 +679,7 @@ export function importLegacyHostsBlocks(): Promise<HostsOperationResult> {
       selection: { ...state.selection, ...imported },
       adobeBlock: state.adobeBlock || adobePairs.length > 0
     }
-    const outcome = await applyCandidate(catalog, candidate, { allowLegacy: true })
+    const outcome = await applyCandidate(catalog, candidate, { allowLegacy: true, recovery })
     return operationResult(
       catalog,
       source,
@@ -657,8 +693,8 @@ export function importLegacyHostsBlocks(): Promise<HostsOperationResult> {
 export function reapplyHostsState(forceProbe = false): Promise<HostsOperationResult> {
   return withHostsLock(async () => {
     const { catalog, source } = getHostsCatalog()
-    const state = loadEffectiveState(catalog)
-    const outcome = await applyCandidate(catalog, state, { forceProbe })
+    const { state, recovery } = await loadEffectiveState(catalog)
+    const outcome = await applyCandidate(catalog, state, { forceProbe, recovery })
     return operationResult(catalog, source, outcome, 'Настройки hosts применены')
   })
 }
@@ -672,7 +708,7 @@ export function reapplyHostsState(forceProbe = false): Promise<HostsOperationRes
 export function refreshHostsAddresses(): Promise<HostsOperationResult> {
   return withHostsLock(async () => {
     const { catalog, source } = getHostsCatalog()
-    const state = loadEffectiveState(catalog)
+    const { state, recovery } = await loadEffectiveState(catalog)
 
     // Services that are on, plus services the probe turned off earlier: those
     // are exactly the ones worth another chance once fresh addresses exist.
@@ -701,7 +737,7 @@ export function refreshHostsAddresses(): Promise<HostsOperationResult> {
 
     const result = await resolveHosts(hostnames)
     if (result.stats.resolved === 0) {
-      const outcome = await applyCandidate(catalog, state)
+      const outcome = await applyCandidate(catalog, state, { recovery })
       return operationResult(
         catalog,
         source,
@@ -734,7 +770,7 @@ export function refreshHostsAddresses(): Promise<HostsOperationResult> {
       resolvedIps: result.resolved,
       resolvedAt: new Date().toISOString()
     }
-    const outcome = await applyCandidate(catalog, next)
+    const outcome = await applyCandidate(catalog, next, { recovery })
 
     const parts = [
       `Проверено доменов: ${result.stats.checked}`,

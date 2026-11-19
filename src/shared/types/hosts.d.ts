@@ -91,6 +91,17 @@ interface HostsLegacyBlocks {
   adobe: boolean
 }
 
+/**
+ * Present when `hosts-state.json` could not be parsed and was rebuilt from the
+ * managed block in the system hosts file (C4). The corrupt file is retained
+ * next to the profile so the user can inspect it.
+ */
+interface HostsStateRecovery {
+  recovered: boolean
+  warning?: string
+  corruptPath?: string
+}
+
 interface HostsFileStatus {
   path: string
   exists: boolean
@@ -107,6 +118,7 @@ interface HostsFileStatus {
   /** True when the catalog/state would render a different managed block. */
   needsReapply: boolean
   legacy: HostsLegacyBlocks
+  recovery?: HostsStateRecovery
 }
 
 interface HostsOverview {
@@ -114,6 +126,7 @@ interface HostsOverview {
   catalogSource: 'bundled' | 'downloaded'
   state: HostsState
   status: HostsFileStatus
+  recovery?: HostsStateRecovery
 }
 
 interface HostsOperationResult extends HostsOverview {

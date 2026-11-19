@@ -7,11 +7,18 @@
  */
 
 import { existsSync, readFileSync } from 'node:fs'
-import { mkdir, rename, unlink, writeFile } from 'node:fs/promises'
+import { mkdir, unlink, writeFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { isIP } from 'node:net'
 import path from 'node:path'
 import { dataDir } from '../utils/dirs'
+import { renameWithRetry } from '../utils/fs-retry'
+import { appLog } from '../utils/app-logger'
+import {
+  hashHostsContent,
+  importLegacySelection,
+  parseEditorBlock
+} from './hosts-render'
 
 const STATE_FILE = 'hosts-state.json'
 
@@ -167,6 +174,120 @@ export function loadHostsState(catalog: HostsCatalog): HostsState {
   }
 }
 
+export interface LoadHostsStateOptions {
+  /**
+   * Current bytes of the system hosts file. Used only to rebuild a corrupt
+   * state file; recovery never writes the hosts file.
+   */
+  hostsContent?: string
+  /** Injected clock for tests. */
+  now?: () => Date
+}
+
+function corruptStatePath(file: string, now: () => Date): string {
+  const stamp = now().toISOString().replace(/[:.]/g, '-')
+  const base = file.replace(/\.json$/i, '')
+  return `${base}.corrupt-${stamp}.json`
+}
+
+/**
+ * Move the unparseable state aside and rebuild the selection from the managed
+ * block that is currently on disk. Falling back to `defaultHostsState` (the old
+ * behaviour) silently switched every service off even though the user's pins
+ * were still present in the hosts file.
+ *
+ * Recovery is read-only with respect to `hosts`: the rebuilt state is written
+ * only after the corrupt file has been moved out of the way, so a failed move
+ * cannot destroy the evidence.
+ */
+async function recoverCorruptState(
+  catalog: HostsCatalog,
+  file: string,
+  options: LoadHostsStateOptions
+): Promise<{ state: HostsState; recovery: HostsStateRecovery }> {
+  const now = options.now ?? (() => new Date())
+  const corruptPath = corruptStatePath(file, now)
+  let moved = false
+  try {
+    await renameWithRetry(file, corruptPath)
+    moved = true
+  } catch (e) {
+    appLog(
+      'warn',
+      `hosts-state: не удалось переместить повреждённый файл — ${
+        e instanceof Error ? e.message : String(e)
+      }`
+    )
+  }
+
+  const base = defaultHostsState(catalog)
+  const hostsContent = options.hostsContent ?? ''
+  const pairs = hostsContent ? parseEditorBlock(hostsContent) : []
+  const imported = pairs.length > 0
+    ? importLegacySelection(catalog, pairs, base.defaultDnsProfile)
+    : {}
+  const recoveredFromHosts = Object.keys(imported).length > 0
+
+  // `renderedHash` is only set when the selection actually came from the file:
+  // it tells `buildStatus` that the current hosts content is the baseline, so a
+  // later change is still reported as an external edit.
+  const state: HostsState = recoveredFromHosts
+    ? {
+        ...base,
+        selection: { ...base.selection, ...imported },
+        renderedHash: hashHostsContent(hostsContent)
+      }
+    : base
+
+  const location = moved ? ` Файл сохранён как «${path.basename(corruptPath)}».` : ''
+  const warning = recoveredFromHosts
+    ? 'Состояние hosts повреждено и восстановлено по блоку в файле hosts.' +
+      location +
+      ' Проверьте выбор сервисов и нажмите «Применить».'
+    : 'Состояние hosts повреждено; подходящего блока в файле hosts нет — ' +
+      'выбор сервисов сброшен к значениям по умолчанию.' +
+      location
+
+  if (moved) {
+    // Persist the rebuilt state so the next start (and the next IPC call)
+    // sees it instead of falling back to defaults. The hosts file is untouched.
+    try {
+      await saveHostsState(state)
+    } catch (e) {
+      appLog(
+        'warn',
+        `hosts-state: восстановленное состояние не сохранено — ${
+          e instanceof Error ? e.message : String(e)
+        }`
+      )
+    }
+  }
+
+  appLog('warn', `hosts-state: ${warning}`)
+  return {
+    state,
+    recovery: { recovered: true, warning, corruptPath: moved ? corruptPath : undefined }
+  }
+}
+
+/**
+ * Async variant used by the hosts editor: recovers a corrupt state file as a
+ * side effect and reports what happened so the UI can show a banner.
+ */
+export async function loadHostsStateRecovering(
+  catalog: HostsCatalog,
+  options: LoadHostsStateOptions = {}
+): Promise<{ state: HostsState; recovery?: HostsStateRecovery }> {
+  const file = hostsStatePath()
+  try {
+    if (!existsSync(file)) return { state: defaultHostsState(catalog) }
+    const parsed = JSON.parse(readFileSync(file, 'utf8').replace(/^\uFEFF/, '')) as unknown
+    return { state: normalizeHostsState(parsed, catalog) }
+  } catch {
+    return recoverCorruptState(catalog, file, options)
+  }
+}
+
 export async function saveHostsState(state: HostsState): Promise<void> {
   const target = hostsStatePath()
   const tmp = `${target}.${randomUUID()}.tmp`
@@ -176,7 +297,10 @@ export async function saveHostsState(state: HostsState): Promise<void> {
       encoding: 'utf8',
       flag: 'wx'
     })
-    await rename(tmp, target)
+    // AV/indexer handles make Windows fail with EPERM/EBUSY briefly; retrying
+    // is what keeps "настройки hosts не сохраняются" from happening on those
+    // machines (CA7).
+    await renameWithRetry(tmp, target)
   } catch (e) {
     try {
       await unlink(tmp)

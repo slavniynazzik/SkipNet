@@ -1,4 +1,4 @@
-﻿import { readFile, writeFile, rename, copyFile, unlink } from 'fs/promises'
+﻿import { readFile, writeFile, copyFile, unlink } from 'fs/promises'
 import { appConfigPath } from '../utils/dirs'
 import { parseYaml, stringifyYaml } from '../utils/yaml'
 import { deepMerge } from '../utils/merge'
@@ -7,7 +7,8 @@ import { sanitizeAppConfig, validateAppConfigPatch } from './schema'
 import { randomBytes, randomUUID } from 'crypto'
 import { readFileSync, existsSync } from 'fs'
 import { is } from '@electron-toolkit/utils'
-import { enableAutoRun, disableAutoRun } from '../sys/autoRun'
+import { enableAutoRun, disableAutoRun, type AutoRunResult } from '../sys/autoRun'
+import { renameWithRetry } from '../utils/fs-retry'
 
 let appConfig: AppConfig | undefined
 let writePromise: Promise<void> = Promise.resolve()
@@ -30,7 +31,9 @@ async function safeWriteConfig(content: string): Promise<void> {
     }
     // `rename` atomically replaces an existing destination on both Windows and
     // POSIX, so the live config is never missing between unlink and rename.
-    await rename(tmpPath, configPath)
+    // AV/indexer handles make Windows fail with EPERM/EBUSY for a few
+    // milliseconds — retry those instead of reporting a lost setting.
+    await renameWithRetry(tmpPath, configPath)
   } catch (e) {
     if (existsSync(tmpPath)) {
       try { await unlink(tmpPath) } catch { /* noop */ }
@@ -202,11 +205,27 @@ export async function patchAppConfig(patch: Partial<AppConfig>): Promise<void> {
     appConfig = deepMerge(appConfig ?? structuredClone(defaultConfig), cleanPatch)
     await safeWriteConfig(stringifyYaml(appConfig))
 
+    // Windows is the source of truth for the logon task. If registration or
+    // removal fails, roll the persisted flag back and surface the reason:
+    // silently keeping `autoLaunch: true` made the toggle lie until the next
+    // failed boot attempt.
+    let autoLaunchError: Error | null = null
     if (cleanPatch.autoLaunch !== undefined && cleanPatch.autoLaunch !== prevAutoLaunch) {
+      let result: AutoRunResult
       try {
-        if (cleanPatch.autoLaunch) await enableAutoRun()
-        else await disableAutoRun()
-      } catch { /* noop */ }
+        result = cleanPatch.autoLaunch ? await enableAutoRun() : await disableAutoRun()
+      } catch (e) {
+        result = { ok: false, message: e instanceof Error ? e.message : String(e) }
+      }
+      if (!result.ok) {
+        appConfig = { ...appConfig, autoLaunch: prevAutoLaunch ?? false }
+        try {
+          await safeWriteConfig(stringifyYaml(appConfig))
+        } catch {
+          /* best effort — the in-memory flag already agrees with Windows */
+        }
+        autoLaunchError = new Error(result.message)
+      }
     }
     // React to tray toggle: create or destroy tray on the fly so the user
     // doesn't have to relaunch the app for the change to take effect.
@@ -238,6 +257,11 @@ export async function patchAppConfig(patch: Partial<AppConfig>): Promise<void> {
         if (!win.isDestroyed()) win.webContents.send('appConfigUpdated')
       }
     } catch { /* noop */ }
+
+    // Throw only after every side effect and the renderer refresh ran, so the
+    // toggle visibly snaps back to the rolled-back value together with the
+    // error message.
+    if (autoLaunchError) throw autoLaunchError
   }
 
   const previous = writePromise

@@ -21,6 +21,7 @@ import {
 import { assertExpectedReleaseTag, verifyAsset } from './update-integrity'
 import { getZapretStatus, startZapret, stopZapret } from './zapret'
 import { stopTgws } from './tgws'
+import { appLog } from '../utils/app-logger'
 
 const DEFAULT_REPO = 'slavniynazzik/SkipNet'
 const INSTALLER_ASSET_PATTERNS = [/^SkipNet_x64\.exe$/i] as const
@@ -510,16 +511,24 @@ export async function installAppUpdate(tag: string): Promise<{ scheduled: true }
     }
   }
 
-  // Give NSIS a beat to acquire the install lock, then quit. If we quit
-  // synchronously the installer's "is target running?" probe sometimes
-  // races and shows a "close SkipNet" prompt despite /S.
+  // Give NSIS a beat to acquire the install lock, then quit. Quit gracefully:
+  // `before-quit` stops TgWs/Zapret and waits for them before the process
+  // exits. Do NOT `process.exit` here — that bypassed the cleanup and left
+  // winws.exe orphaned, which then blocked the first start of the new build.
   setTimeout(() => {
     try {
       app.quit()
-    } catch {
-      /* falling through to process.exit below */
+    } catch (e) {
+      appLog('error', `Не удалось корректно завершить приложение для обновления: ${e}`)
+      // Last resort, still graceful: a second quit after the current turn.
+      setTimeout(() => {
+        try {
+          app.quit()
+        } catch {
+          /* the relaunch watcher will start the new build on its own */
+        }
+      }, 500)
     }
-    setTimeout(() => process.exit(0), 1000)
   }, 800)
 
   return { scheduled: true }

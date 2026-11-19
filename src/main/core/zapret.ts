@@ -577,9 +577,14 @@ async function startZapretImpl(): Promise<void> {
 
     if (winwsHealth === 'failed') {
       log('error', `winws.exe reported a fatal error: ${winwsLastError ?? '(no detail)'}`)
-      exitStatusSuppressed = true
+      // Tear the child down before reporting: if it were left alive the next
+      // start would see `child !== null` and silently do nothing. Clearing the
+      // suppression flag afterwards is safe because `child` is already null,
+      // so the late `exit` event fails the `isCurrent` check and cannot
+      // overwrite this error.
       await killWinws()
       child = null
+      exitStatusSuppressed = false
       setStatus({
         state: 'error',
         pid: undefined,
@@ -605,7 +610,12 @@ async function startZapretImpl(): Promise<void> {
     return
   }
 
-  exitStatusSuppressed = true
+  // 7 s without a health signal: give up and *unwrap* the state. Before CA4
+  // this branch left `child` set, so every later Start hit `if (child) return`
+  // and Zapret stayed dead until the app was restarted.
+  await killWinws()
+  child = null
+  exitStatusSuppressed = false
   setStatus({
     state: 'error',
     lastError: 'winws.exe не запустился за 7с — запустите приложение от администратора'

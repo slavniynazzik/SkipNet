@@ -92,6 +92,7 @@ import { execFile } from 'node:child_process'
 import { writeFileSync, unlinkSync } from 'node:fs'
 import path from 'node:path'
 import { isTrustedFrameUrl, type TrustedFrameOptions } from './ipc-trust'
+import { appLog } from './app-logger'
 import type { InvokeChannel } from '../../shared/ipc-channels'
 
 //
@@ -255,34 +256,71 @@ function isTrustedSender(event: Electron.IpcMainInvokeEvent): boolean {
 }
 
 /** Serialise success/failure without leaking exceptions across IPC. */
-async function seal<T>(run: () => Promise<T> | T): Promise<{ ok: true; value: T } | IpcFailure> {
-  try {
-    return { ok: true, value: await run() }
-  } catch (e: unknown) {
-    return { ok: false, message: e instanceof Error ? e.message : String(e) }
+function sealFailure(error: unknown): IpcFailure {
+  return {
+    ok: false,
+    message: error instanceof Error ? error.message : String(error)
   }
 }
 
 /**
- * Thin wrapper so any unhandled error in an IPC handler is serialised
- * back to the caller as `{ ok: false, message }` instead of crashing.
+ * Marks a handler that ignores the IPC event. Trust checking and the
+ * `{ ok, value }` envelope are applied by `registerHandler`, where the channel
+ * name is known and can be included in the error log.
  */
-function h<T>(fn: (...args: unknown[]) => Promise<T> | T) {
-  return async (event: Electron.IpcMainInvokeEvent, ...args: unknown[]) => {
-    if (!isTrustedSender(event)) return IPC_DENIED
-    return seal(() => fn(...args))
-  }
+function h<T>(fn: (...args: unknown[]) => Promise<T> | T): IpcHandler {
+  return (_event, ...args) => fn(...args)
+}
+
+/** Same for handlers that need the calling frame (window controls). */
+function hWindow<T>(
+  fn: (event: Electron.IpcMainInvokeEvent) => Promise<T> | T
+): IpcHandler {
+  return (event) => fn(event)
 }
 
 /**
- * Same guard and `{ ok, value }` envelope as `h`, for handlers that need the
- * calling frame (window controls).
+ * Relaunch requested from the renderer.
+ *
+ * The flag lives here (not in `index.ts`) so the IPC handler does not import
+ * the main entry point — that would be a circular import. `index.ts` reads it
+ * from `will-quit`, *after* `before-quit` cleanup has stopped the children, and
+ * only then spawns the new instance.
  */
-function hWindow<T>(fn: (event: Electron.IpcMainInvokeEvent) => Promise<T> | T) {
-  return async (event: Electron.IpcMainInvokeEvent) => {
+let relaunchRequested = false
+
+export function requestRelaunch(): void {
+  relaunchRequested = true
+  // A graceful quit so `before-quit` can stop TgWs/Zapret first. Calling
+  // `app.exit(0)` here was the CA3 bug: it skipped cleanup and orphaned
+  // winws.exe on the next start.
+  app.quit()
+}
+
+export function isRelaunchRequested(): boolean {
+  return relaunchRequested
+}
+
+/**
+ * Register one allow-listed channel.
+ *
+ * Every handler runs behind: (1) the exact-frame trust check, (2) a
+ * `{ ok: true, value }` envelope, and (3) structured error logging with the
+ * channel, message and stack. Logging here (instead of inside `h`) is what
+ * makes `{channel, message, stack}` available for every failure.
+ */
+function registerHandler(channel: InvokeChannel, handler: IpcHandler): void {
+  ipcMain.handle(channel, async (event, ...args) => {
     if (!isTrustedSender(event)) return IPC_DENIED
-    return seal(() => fn(event))
-  }
+    try {
+      return { ok: true, value: await handler(event, ...args) }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      const stack = error instanceof Error ? (error.stack ?? message) : message
+      appLog('error', `IPC ${channel} failed: ${JSON.stringify({ channel, message, stack })}`)
+      return sealFailure(error)
+    }
+  })
 }
 
 /**
@@ -425,10 +463,7 @@ export function registerIpcMainHandlers(): void {
 
     // ---- Quit / restart ---------------------------------------------------
     'app:quit': h(() => app.quit()),
-    'app:relaunch': h(() => {
-      app.relaunch()
-      app.exit(0)
-    }),
+    'app:relaunch': h(() => requestRelaunch()),
 
     // ---- Window controls (window-controls.tsx) ----------------------------
     'windowIsMaximized': hWindow(
@@ -449,7 +484,7 @@ export function registerIpcMainHandlers(): void {
   }
 
   for (const channel of Object.keys(handlers) as InvokeChannel[]) {
-    ipcMain.handle(channel, handlers[channel])
+    registerHandler(channel, handlers[channel])
   }
 }
 

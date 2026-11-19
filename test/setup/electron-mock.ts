@@ -7,7 +7,7 @@
  * real hosts file or the network: all paths live under a unique directory in
  * the OS temp folder.
  */
-import { mkdirSync, mkdtempSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
@@ -32,6 +32,11 @@ for (const dir of [
 ]) {
   mkdirSync(dir, { recursive: true })
 }
+
+// Simulate an *installed* build: the exe directory contains the NSIS
+// uninstaller, so `isPortable()` (CA6) must keep data in `userData`. Portable
+// behaviour is covered by its own suite with explicit temp dirs.
+writeFileSync(path.join(testPaths.appPath, 'Uninstall SkipNet.exe'), '')
 
 /* -------------------------------------------------------------------------- */
 /* app                                                                        */

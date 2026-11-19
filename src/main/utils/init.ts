@@ -7,6 +7,7 @@
 } from './dirs'
 import { defaultConfig } from './template'
 import { stringifyYaml } from './yaml'
+import { initAppLog } from './app-logger'
 import { mkdir, writeFile, copyFile, rename, unlink } from 'fs/promises'
 import { randomUUID } from 'crypto'
 import { existsSync } from 'fs'
@@ -116,5 +117,7 @@ function initDeeplink(): void {
 export async function init(): Promise<void> {
   await initDirs()
   await initConfig()
+  // Prune day files beyond `maxLogDays` before the first line is written.
+  await initAppLog()
   initDeeplink()
 }

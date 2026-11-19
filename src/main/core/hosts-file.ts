@@ -7,7 +7,19 @@
  * re-encoded.
  */
 
-import { accessSync, constants, existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
+import {
+  accessSync,
+  closeSync,
+  constants,
+  existsSync,
+  fsyncSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+  writeSync
+} from 'node:fs'
 import { createHash, randomUUID } from 'node:crypto'
 import os from 'node:os'
 import path from 'node:path'
@@ -76,15 +88,97 @@ export function hostsFileWritable(): boolean {
   }
 }
 
+export type HostsWriteFailureReason = 'uac-cancelled' | 'elevated-failed' | 'direct-failed'
+
 export interface HostsWriteResult {
   ok: boolean
   elevated: boolean
+  reason?: HostsWriteFailureReason
   error?: string
+}
+
+const HOSTS_TEMP_PREFIX = 'hosts.skipnet-'
+
+/**
+ * Atomic in-place write: temp file **in the same directory** (a rename across
+ * volumes is not atomic and would fail with EXDEV), `fsync` the bytes, then
+ * `rename` over the target.
+ *
+ * If `rename` fails after the temp file was written — Windows returns EPERM or
+ * EBUSY while Defender/indexer/backup holds a handle on `hosts` — we fall back
+ * to the historical truncate-in-place write. Falling back is deliberate: the
+ * caller has already decided that the *contents* must change, and failing here
+ * would leave the user with a stale hosts file for a transient AV window. The
+ * fallback is the only non-atomic path left, and it is documented as such.
+ */
+function writeHostsFileAtomically(target: string, payload: Buffer): void {
+  const tmp = path.join(path.dirname(target), `${HOSTS_TEMP_PREFIX}${randomUUID()}.tmp`)
+  let fd: number | null = null
+  try {
+    // `wx` refuses to follow a pre-created file/symlink in the privileged
+    // etc directory (defence against a hardlink trick).
+    fd = openSync(tmp, 'wx', 0o644)
+    writeSync(fd, payload)
+    fsyncSync(fd)
+  } catch (e) {
+    if (fd !== null) {
+      try {
+        closeSync(fd)
+      } catch {
+        /* noop */
+      }
+      fd = null
+    }
+    try {
+      unlinkSync(tmp)
+    } catch {
+      /* noop */
+    }
+    throw e
+  } finally {
+    if (fd !== null) {
+      try {
+        closeSync(fd)
+      } catch {
+        /* noop */
+      }
+    }
+  }
+
+  try {
+    renameSync(tmp, target)
+  } catch (renameError) {
+    try {
+      writeFileSync(target, payload)
+    } catch (writeError) {
+      try {
+        unlinkSync(tmp)
+      } catch {
+        /* noop */
+      }
+      // Prefer the truncate error: it is the one that explains why the caller
+      // has to elevate. Keep the rename error attached for diagnostics.
+      const detail = renameError instanceof Error ? renameError.message : String(renameError)
+      if (writeError instanceof Error) {
+        writeError.message = `${writeError.message} (rename: ${detail})`
+      }
+      throw writeError
+    }
+    try {
+      unlinkSync(tmp)
+    } catch {
+      /* noop */
+    }
+  }
 }
 
 /**
  * Write the hosts file. Direct write works when SkipNet has administrator
  * rights; otherwise retry through a UAC-elevated PowerShell copy.
+ *
+ * The elevated result is classified, never inferred from "did the launcher
+ * start": a dismissed UAC prompt and a failed elevated script both return
+ * `ok: false` with a different `reason`.
  */
 export function writeHostsContent(content: string): HostsWriteResult {
   return writeHostsContentTo(windowsHostsPath(), content)
@@ -93,7 +187,7 @@ export function writeHostsContent(content: string): HostsWriteResult {
 /** Same writer with an explicit target, used by tests and future backups. */
 export function writeHostsContentTo(target: string, content: string): HostsWriteResult {
   try {
-    writeFileSync(target, Buffer.from(content, 'latin1'))
+    writeHostsFileAtomically(target, Buffer.from(content, 'latin1'))
     return { ok: true, elevated: false }
   } catch (directError) {
     const tempPath = path.join(os.tmpdir(), `skipnet-hosts-new-${randomUUID()}.txt`)
@@ -114,16 +208,33 @@ export function writeHostsContentTo(target: string, content: string): HostsWrite
         '}\r\n'
       const elevated = runPowerShellElevated(script, 60_000)
       if (elevated.ok) return { ok: true, elevated: true }
+
+      if (elevated.outcome === 'uac-cancelled') {
+        return {
+          ok: false,
+          elevated: true,
+          reason: 'uac-cancelled',
+          error:
+            'Повышение прав отменено (UAC) или недоступно. Файл hosts не изменён — ' +
+            'разрешите запрос администратора и повторите попытку.'
+        }
+      }
+      const detail = elevated.stderr.trim()
       return {
         ok: false,
         elevated: true,
-        error: elevated.stderr.trim() || 'UAC был отменён или запись запрещена'
+        reason: 'elevated-failed',
+        error:
+          detail ||
+          `Повышенный процесс завершился с кодом ${elevated.exitCode ?? '?'}. ` +
+            'Файл hosts не изменён.'
       }
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e)
       return {
         ok: false,
         elevated: false,
+        reason: 'direct-failed',
         error:
           message ||
           (directError instanceof Error ? directError.message : String(directError))

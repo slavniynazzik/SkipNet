@@ -5,8 +5,36 @@ import path from 'path'
 
 export const homeDir = app.getPath('home')
 
+/** Optional opt-in marker for a hand-made portable copy. */
+const PORTABLE_MARKER = 'PORTABLE'
+/** NSIS uninstaller written next to the exe by the installed build. */
+const UNINSTALLER_NAMES = ['Uninstall SkipNet.exe', 'uninstall.exe']
+
+/**
+ * Detect a portable (unpacked 7z) build from its directory.
+ *
+ * A portable copy is either explicitly marked with a `PORTABLE` file or — the
+ * normal case, because `electron-builder`'s 7z target does not add one — simply
+ * lacks the NSIS uninstaller that every installed build has. The installed
+ * build must never create a marker: its data lives in `%APPDATA%\skipnet`, and
+ * a stray marker would silently move it next to Program Files.
+ *
+ * `exists` is injectable so the decision can be unit-tested with temp dirs.
+ */
+export function detectPortableDir(
+  dir: string,
+  exists: (candidate: string) => boolean = existsSync
+): boolean {
+  if (exists(path.join(dir, PORTABLE_MARKER))) return true
+  return !UNINSTALLER_NAMES.some((name) => exists(path.join(dir, name)))
+}
+
 export function isPortable(): boolean {
-  return existsSync(path.join(exeDir(), 'PORTABLE'))
+  // In dev `exePath()` is electron.exe inside node_modules/electron/dist. It
+  // has no uninstaller, so the "no uninstaller" heuristic would move the dev
+  // profile into the toolchain folder. Only an explicit marker applies there.
+  if (is.dev) return existsSync(path.join(exeDir(), PORTABLE_MARKER))
+  return detectPortableDir(exeDir())
 }
 
 export function dataDir(): string {
@@ -109,10 +137,18 @@ export function logDir(): string {
   return path.join(dataDir(), 'logs')
 }
 
-export function logPath(): string {
-  const date = new Date()
-  const name = `${date.getFullYear()}-${date.getMonth() + 1}-${date.getDate()}`
-  return path.join(logDir(), `${name}.log`)
+function pad2(value: number): string {
+  return String(value).padStart(2, '0')
+}
+
+/** Per-day log file name: `app-YYYY-MM-DD.log` (local time). */
+export function logFileName(date = new Date()): string {
+  return `app-${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}.log`
+}
+
+/** Absolute path of the day's log file. */
+export function logPath(date = new Date()): string {
+  return path.join(logDir(), logFileName(date))
 }
 
 /**

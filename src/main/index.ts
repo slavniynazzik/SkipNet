@@ -3,7 +3,7 @@ import { app, BrowserWindow, dialog, Menu, session, shell } from 'electron'
 import windowStateKeeper from 'electron-window-state'
 import { join } from 'path'
 import icon from '../../resources/icon.png?asset'
-import { registerIpcMainHandlers } from './utils/ipc'
+import { registerIpcMainHandlers, isRelaunchRequested } from './utils/ipc'
 import { isTrustedFrameUrl, type TrustedFrameOptions } from './utils/ipc-trust'
 import { init } from './utils/init'
 import { getAppConfig, getAppConfigSync } from './config'
@@ -19,11 +19,27 @@ import { consumeResumeZapretAfterUpdate } from './core/app-updater'
 import { initWallpaperProtocol, registerWallpaperScheme } from './core/wallpaper'
 import { migrateLegacyData } from './utils/dirs'
 
+// Lock the userData / cache / log folder names. Must happen before the
+// single-instance lock below: Electron keys the lock off `userData`, so the
+// dev and installed builds must resolve to different profiles first.
+app.setName(is.dev ? 'skipnet-dev' : 'skipnet')
+
+/* Single-instance lock.
+ *
+ * A second launch must not touch the profile at all: registering IPC, writing
+ * the config, re-registering protocol handlers, creating directories or
+ * migrating legacy data from a duplicate instance can race the real one.
+ * `app.quit()` is asynchronous and would let the rest of this module run, so
+ * exit the bootstrap immediately — nothing has been started yet at this point
+ * (no windows, no child processes).
+ */
+if (!app.requestSingleInstanceLock()) {
+  app.quit()
+  process.exit(0)
+}
+
 // The wallpaper media protocol must be declared before Electron is ready.
 registerWallpaperScheme()
-
-// Lock the userData / cache / log folder names.
-app.setName(is.dev ? 'skipnet-dev' : 'skipnet')
 
 // Copy `%APPDATA%\slipgate` into the new profile before anything reads the
 // config, so the rebrand does not wipe an existing installation's settings.
@@ -84,11 +100,6 @@ function applyWebContentsGuards(contents: Electron.WebContents): void {
 app.on('web-contents-created', (_event, contents) => {
   applyWebContentsGuards(contents)
 })
-
-/* Single-instance lock */
-if (!app.requestSingleInstanceLock()) {
-  app.quit()
-}
 
 // Surface unexpected errors to the Logs page instead of silent console spam.
 process.on('uncaughtException', (err) => {
@@ -185,8 +196,10 @@ app.whenReady().then(async () => {
   // Synchronise Windows auto-launch with the saved config — keeps the toggle
   // in settings honest if the user manually edited startup outside the app.
   try {
-    if (appConfig.autoLaunch) await enableAutoRun()
-    else await disableAutoRun()
+    const autoRun = appConfig.autoLaunch
+      ? await enableAutoRun()
+      : await disableAutoRun()
+    if (!autoRun.ok) appLog('warn', `autoLaunch sync failed: ${autoRun.message}`)
   } catch (e) {
     appLog('warn', `autoLaunch sync failed: ${e}`)
   }
@@ -207,6 +220,8 @@ app.on('window-all-closed', () => {
 })
 
 let cleanupRan = false
+let cleanupPromise: Promise<void> | null = null
+let cleanupDone = false
 let isQuitting = false
 
 /**
@@ -267,16 +282,54 @@ async function cleanupServices(): Promise<void> {
   syncKillChildren()
 }
 
-app.on('before-quit', async (e) => {
+/**
+ * Start cleanup once and return the same promise to every caller. A second
+ * `before-quit` (Electron emits it again for every `app.quit()`) must await
+ * this promise instead of racing a second `taskkill`.
+ */
+function cleanupServicesOnce(): Promise<void> {
+  if (!cleanupPromise) cleanupPromise = cleanupServices()
+  return cleanupPromise
+}
+
+app.on('before-quit', (e) => {
   // Tell `mainWindow.on('close')` that this is a real quit — it must NOT
   // intercept the close to hide-to-tray.
   isQuitting = true
-  if (cleanupRan) return
-  appLog('info', 'Выход из приложения, остановка всех сервисов…')
+  if (cleanupDone) return
+
   // Hold the quit until child processes are actually dead, so Telegram
-  // immediately loses its proxy.
+  // immediately loses its proxy. This also covers the second `before-quit`
+  // emitted while the promise is still pending.
   e.preventDefault()
-  await cleanupServices()
+  if (cleanupPromise) return
+
+  appLog('info', 'Выход из приложения, остановка всех сервисов…')
+  cleanupPromise = cleanupServicesOnce().then(() => {
+    cleanupDone = true
+    if (isRelaunchRequested()) {
+      // Let the quit sequence continue so `will-quit` can spawn the new
+      // instance *after* the children are gone (CA3).
+      app.quit()
+      return
+    }
+    // Cleanup finished; exit without re-entering the quit sequence.
+    app.exit(0)
+  })
+})
+
+app.on('will-quit', () => {
+  // Runs only after `before-quit`'s cleanup promise resolved (the only path
+  // that does not call `app.exit` directly is a requested relaunch).
+  if (isRelaunchRequested()) {
+    try {
+      appLog('info', 'Перезапуск приложения после очистки сервисов')
+      app.relaunch({ args: process.argv.slice(1) })
+    } catch (e) {
+      appLog('error', `app.relaunch failed: ${e}`)
+    }
+  }
+  syncKillChildren()
   app.exit(0)
 })
 

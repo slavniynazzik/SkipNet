@@ -11,16 +11,39 @@
  * The elevated body is passed with `-EncodedCommand` instead of a temporary
  * `.ps1` file. A file in %TEMP% can be replaced while the UAC prompt is open;
  * an encoded command line cannot.
+ *
+ * `Start-Process` is invoked with `-PassThru -Wait` so the launcher waits for
+ * the *elevated* process and can return its exit code. Without `-PassThru`,
+ * `$LASTEXITCODE`/`exit` describe `powershell.exe` itself, which always exits 0
+ * when the UAC prompt is dismissed — that made a failed hosts write look like
+ * a success (P1-1).
  */
 
 import { spawnSync } from 'node:child_process'
 import path from 'node:path'
 
+/** Buckets a caller can act on: retry, show a UAC hint, or report a script error. */
+export type ElevatedOutcome = 'success' | 'uac-cancelled' | 'failed'
+
 export interface ElevatedRunResult {
   ok: boolean
+  outcome: ElevatedOutcome
+  /** Exit code of the *elevated* process (null when it never started). */
+  exitCode: number | null
   stdout: string
   stderr: string
 }
+
+/**
+ * Marker written by the launcher when `Start-Process -Verb RunAs` itself
+ * throws (user dismissed UAC, elevation blocked by policy, ...). The elevated
+ * script cannot produce it, so the two failure modes stay distinguishable even
+ * though both surface as a non-zero exit code.
+ */
+export const UAC_CANCELLED_MARKER = 'SKIPNET_UAC_CANCELLED'
+
+/** Same numeric value as ERROR_CANCELLED, used as the launcher's exit code. */
+export const UAC_CANCELLED_EXIT_CODE = 1223
 
 function windowsRoot(): string {
   const raw = (process.env.SystemRoot || process.env.windir || 'C:\\Windows').replace(
@@ -34,18 +57,87 @@ function powershellPath(): string {
   return path.join(windowsRoot(), 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
 }
 
+/** `-EncodedCommand` payload: UTF-16LE with a BOM, base64-encoded. */
+export function encodePowerShellCommand(body: string): string {
+  return Buffer.from(`\ufeff${body}\r\n`, 'utf16le').toString('base64')
+}
+
+/**
+ * Build the `-Command` script executed by the non-elevated launcher.
+ *
+ * Extracted as a pure function so the `-PassThru -Wait` + `exit $p.ExitCode`
+ * contract has a unit test: regressing to a plain `Start-Process -Wait` would
+ * silently reintroduce the false-success bug.
+ */
+export function buildElevatedLauncher(file: string, encodedCommand: string): string {
+  return [
+    '$ErrorActionPreference = "Stop"',
+    'try {',
+    `  $p = Start-Process -FilePath ${psQuote(file)} -Verb RunAs -PassThru -Wait -WindowStyle Hidden ` +
+      `-ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-EncodedCommand','${encodedCommand}'`,
+    '  exit $p.ExitCode',
+    '} catch {',
+    `  [Console]::Error.WriteLine('${UAC_CANCELLED_MARKER}: ' + $_.Exception.Message)`,
+    `  exit ${UAC_CANCELLED_EXIT_CODE}`,
+    '}'
+  ].join('\r\n')
+}
+
+/**
+ * Map a finished launcher run onto `{ ok, outcome, exitCode }`.
+ *
+ * Rules, in order: the launcher marker / ERROR_CANCELLED means UAC did not
+ * happen; a spawn error means the process never started; exit code 0 is the
+ * only success. A non-zero elevated exit is always a failure — the whole point
+ * of CA1.
+ */
+export function classifyElevatedResult(input: {
+  exitCode: number | null
+  stdout?: string | null
+  stderr?: string | null
+  error?: string | null
+}): ElevatedRunResult {
+  const stdout = input.stdout ?? ''
+  const stderr = input.stderr ?? ''
+  const exitCode = input.exitCode
+
+  if (stderr.includes(UAC_CANCELLED_MARKER) || exitCode === UAC_CANCELLED_EXIT_CODE) {
+    return { ok: false, outcome: 'uac-cancelled', exitCode, stdout, stderr }
+  }
+  if (input.error) {
+    return {
+      ok: false,
+      outcome: 'failed',
+      exitCode,
+      stdout,
+      stderr: stderr || input.error
+    }
+  }
+  if (exitCode === 0) {
+    return { ok: true, outcome: 'success', exitCode, stdout, stderr }
+  }
+  return {
+    ok: false,
+    outcome: 'failed',
+    exitCode,
+    stdout,
+    stderr: stderr || `elevated process exited with code ${exitCode ?? 'unknown'}`
+  }
+}
+
 /**
  * Run a PowerShell script body in a separate elevated PowerShell process and
  * wait for it to finish. The body is base64-encoded as UTF-16LE, which is what
  * `powershell.exe -EncodedCommand` expects, so Cyrillic paths stay intact.
+ *
+ * Synchronous by design: every existing caller is a synchronous
+ * read-modify-write of a system file, and the timeout bounds the wait.
  */
 export function runPowerShellElevated(body: string, timeoutMs = 60_000): ElevatedRunResult {
   try {
-    const encoded = Buffer.from(`\ufeff${body}\r\n`, 'utf16le').toString('base64')
+    const encoded = encodePowerShellCommand(body)
     const file = powershellPath()
-    const launcher =
-      `Start-Process -FilePath ${psQuote(file)} -Verb RunAs -Wait -WindowStyle Hidden ` +
-      `-ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-EncodedCommand','${encoded}'`
+    const launcher = buildElevatedLauncher(file, encoded)
     const r = spawnSync(
       file,
       ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', launcher],
@@ -55,13 +147,20 @@ export function runPowerShellElevated(body: string, timeoutMs = 60_000): Elevate
         encoding: 'utf8'
       }
     )
-    return {
-      ok: r.status === 0,
-      stdout: `${r.stdout ?? ''}`,
-      stderr: `${r.stderr ?? ''}`
-    }
+    return classifyElevatedResult({
+      exitCode: r.status,
+      stdout: r.stdout,
+      stderr: r.stderr,
+      error: r.error ? r.error.message : null
+    })
   } catch (e) {
-    return { ok: false, stdout: '', stderr: e instanceof Error ? e.message : String(e) }
+    return {
+      ok: false,
+      outcome: 'failed',
+      exitCode: null,
+      stdout: '',
+      stderr: e instanceof Error ? e.message : String(e)
+    }
   }
 }
 
