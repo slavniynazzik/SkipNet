@@ -43,6 +43,7 @@ import {
   countEditorBlockLines,
   countLegacyUnknownHostnames,
   detectLegacyBlocks,
+  effectiveEntryIps,
   extractBlock,
   hashHostsContent,
   importLegacySelection,
@@ -61,6 +62,7 @@ import {
   type RenderedHostsBlock
 } from './hosts-render'
 import { probeIps } from './hosts-health'
+import { resolveHosts } from './hosts-resolver'
 
 const BACKUPS_DIR = 'hosts-backups'
 const MAX_BACKUPS = 20
@@ -286,17 +288,19 @@ interface ApplyOutcome {
  * ones. A service whose every address is unreachable is switched off: keeping
  * it enabled would only produce TCP timeouts and a "hosts is broken" feeling.
  */
+function serviceSelection(service: HostsService, state: HostsState): string | null {
+  const value = state.selection[service.id]
+  if (!value || value === 'off') return null
+  if (service.kind === 'hosts') return value === 'hosts' ? 'hosts' : null
+  return value === 'hosts' ? state.defaultDnsProfile || null : value
+}
+
 async function planReachableState(
   catalog: HostsCatalog,
   state: HostsState,
   force = false
 ): Promise<{ state: HostsState; warnings: string[] }> {
-  const selectionOf = (service: HostsService): string | null => {
-    const value = state.selection[service.id]
-    if (!value || value === 'off') return null
-    if (service.kind === 'hosts') return value === 'hosts' ? 'hosts' : null
-    return value === 'hosts' ? state.defaultDnsProfile || null : value
-  }
+  const selectionOf = (service: HostsService): string | null => serviceSelection(service, state)
 
   const perService: Array<{ service: HostsService; ips: string[] }> = []
   const all = new Set<string>()
@@ -304,7 +308,11 @@ async function planReachableState(
     const selection = selectionOf(service)
     if (!selection) continue
     const ips = [
-      ...new Set(selectedEntries(service, selection).flatMap((entry) => entry.ips))
+      ...new Set(
+        selectedEntries(service, selection).flatMap((entry) =>
+          effectiveEntryIps(state, entry.hostname, entry.ips)
+        )
+      )
     ]
     if (ips.length === 0) continue
     perService.push({ service, ips })
@@ -331,13 +339,25 @@ async function planReachableState(
   const skipped = [...all].filter((ip) => reachable.get(ip) === false)
   const skippedSet = new Set(skipped)
   const selection = { ...state.selection }
+  const restoreSelection = { ...(state.restoreSelection ?? {}) }
   const disabled: string[] = []
 
   for (const item of perService) {
     const alive = item.ips.filter((ip) => !skippedSet.has(ip)).length
     if (alive === 0) {
+      const previous = selection[item.service.id]
+      if (previous && previous !== 'off') restoreSelection[item.service.id] = previous
       selection[item.service.id] = 'off'
       disabled.push(item.service.name)
+    } else {
+      delete restoreSelection[item.service.id]
+    }
+  }
+
+  // Forget restoration hints for services that no longer exist or are on.
+  for (const id of Object.keys(restoreSelection)) {
+    if (!catalog.services.some((service) => service.id === id) || selection[id] !== 'off') {
+      delete restoreSelection[id]
     }
   }
 
@@ -347,11 +367,11 @@ async function planReachableState(
     const rest = disabled.length > 3 ? ` и ещё ${disabled.length - 3}` : ''
     warnings.push(
       `Адреса недоступны: ${listed}${rest}. Эти сервисы выключены — ` +
-        'выберите другой DNS-профиль или обновите каталог.'
+        'нажмите «Обновить адреса (DoH)», чтобы подобрать живые, или выберите другой DNS-профиль.'
     )
   }
 
-  return { state: { ...state, selection, skippedIps: skipped }, warnings }
+  return { state: { ...state, selection, restoreSelection, skippedIps: skipped }, warnings }
 }
 
 async function applyCandidate(
@@ -488,9 +508,12 @@ export function setHostsServiceSelection(
           'Выберите другой DNS-профиль.'
       )
     }
+    const restoreSelection = { ...(state.restoreSelection ?? {}) }
+    delete restoreSelection[serviceId]
     const candidate: HostsState = {
       ...state,
-      selection: { ...state.selection, [serviceId]: normalized }
+      selection: { ...state.selection, [serviceId]: normalized },
+      restoreSelection
     }
     const outcome = await applyCandidate(catalog, candidate)
     const profileName =
@@ -554,7 +577,7 @@ export function disableAllHostsServices(): Promise<HostsOperationResult> {
     const state = loadEffectiveState(catalog)
     const selection: Record<string, HostsSelection> = {}
     for (const service of catalog.services) selection[service.id] = 'off'
-    const candidate: HostsState = { ...state, selection }
+    const candidate: HostsState = { ...state, selection, restoreSelection: {} }
     const outcome = await applyCandidate(catalog, candidate)
     return operationResult(catalog, source, outcome, 'Все сервисы выключены')
   })
@@ -637,6 +660,91 @@ export function reapplyHostsState(forceProbe = false): Promise<HostsOperationRes
     const state = loadEffectiveState(catalog)
     const outcome = await applyCandidate(catalog, state, { forceProbe })
     return operationResult(catalog, source, outcome, 'Настройки hosts применены')
+  })
+}
+
+/**
+ * Ask live DNS sources for current answers, prove them with a TLS handshake
+ * and keep the fastest verified addresses. Without this a catalog snapshot
+ * slowly turns every pin into a dead address and each connection waits for the
+ * TCP timeout before falling back.
+ */
+export function refreshHostsAddresses(): Promise<HostsOperationResult> {
+  return withHostsLock(async () => {
+    const { catalog, source } = getHostsCatalog()
+    const state = loadEffectiveState(catalog)
+
+    // Services that are on, plus services the probe turned off earlier: those
+    // are exactly the ones worth another chance once fresh addresses exist.
+    const targets = new Map<string, string[]>()
+    const collect = (service: HostsService, selection: string): string[] => {
+      const hostnames = selectedEntries(service, selection).map((entry) => entry.hostname)
+      targets.set(service.id, hostnames)
+      return hostnames
+    }
+
+    const hostnames: string[] = []
+    for (const service of catalog.services) {
+      const selection = serviceSelection(service, state)
+      if (!selection) continue
+      hostnames.push(...collect(service, selection))
+    }
+    for (const [serviceId, selection] of Object.entries(state.restoreSelection ?? {})) {
+      const service = catalog.services.find((item) => item.id === serviceId)
+      if (!service || !selection || selection === 'off') continue
+      hostnames.push(...collect(service, selection))
+    }
+
+    if (hostnames.length === 0) {
+      throw new Error('Нет включённых сервисов — сначала включите хотя бы один')
+    }
+
+    const result = await resolveHosts(hostnames)
+    if (result.stats.resolved === 0) {
+      const outcome = await applyCandidate(catalog, state)
+      return operationResult(
+        catalog,
+        source,
+        outcome,
+        'Не удалось получить ни одного проверенного адреса: DoH недоступен или ресурсы блокируются по SNI. ' +
+          'Попробуйте включить Zapret и повторить.'
+      )
+    }
+
+    const selection = { ...state.selection }
+    const restoreSelection = { ...(state.restoreSelection ?? {}) }
+    const revived: string[] = []
+
+    for (const [serviceId, previous] of Object.entries(restoreSelection)) {
+      const serviceHostnames = targets.get(serviceId) ?? []
+      const hasLive = serviceHostnames.some(
+        (hostname) => (result.resolved[hostname.toLowerCase()]?.length ?? 0) > 0
+      )
+      if (!hasLive) continue
+      selection[serviceId] = previous
+      delete restoreSelection[serviceId]
+      const service = catalog.services.find((item) => item.id === serviceId)
+      if (service) revived.push(service.name)
+    }
+
+    const next: HostsState = {
+      ...state,
+      selection,
+      restoreSelection,
+      resolvedIps: result.resolved,
+      resolvedAt: new Date().toISOString()
+    }
+    const outcome = await applyCandidate(catalog, next)
+
+    const parts = [
+      `Проверено доменов: ${result.stats.checked}`,
+      `живые адреса найдены для ${result.stats.resolved}`,
+      `всего IP: ${result.stats.addresses}`
+    ]
+    if (revived.length > 0) parts.push(`включено обратно сервисов: ${revived.length}`)
+    if (result.stats.timedOut) parts.push('проверка остановлена по таймауту')
+
+    return operationResult(catalog, source, outcome, parts.join(' · '))
   })
 }
 

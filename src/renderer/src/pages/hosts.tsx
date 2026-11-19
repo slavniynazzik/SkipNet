@@ -5,6 +5,7 @@ import {
   AlertTriangle,
   CheckCircle2,
   FileText,
+  Globe,
   Info,
   Loader2,
   RefreshCw,
@@ -27,6 +28,7 @@ import {
   hostsGetOverview,
   hostsImportLegacy,
   hostsOpenFile,
+  hostsRefreshAddresses,
   hostsRestoreLatest,
   hostsSetAdobe,
   hostsSetDnsForAll,
@@ -240,6 +242,11 @@ const Hosts: React.FC = () => {
   const catalogVersion = catalog?.meta.version ?? ''
   const checkedAt = catalog?.meta.checkedAt
   const skippedCount = state?.skippedIps?.length ?? 0
+  const resolvedAt = state?.resolvedAt
+  const resolvedHostnames = state?.resolvedIps ? Object.keys(state.resolvedIps).length : 0
+  const autoDisabledCount = state?.restoreSelection
+    ? Object.keys(state.restoreSelection).length
+    : 0
 
   const visibleSections = useMemo(() => {
     if (!catalog) return []
@@ -269,10 +276,25 @@ const Hosts: React.FC = () => {
                   строк SkipNet в файле: {managedLines}
                   {catalogVersion ? ` · каталог ${catalogVersion}` : ''}
                   {checkedAt ? ` · каталог обновлён ${formatWhen(checkedAt)}` : ''}
+                  {resolvedAt
+                    ? ` · живые адреса: ${resolvedHostnames} доменов (${formatWhen(resolvedAt)})`
+                    : ''}
                   {skippedCount > 0 ? ` · пропущено адресов: ${skippedCount}` : ''}
                 </div>
               </div>
               <div className="flex flex-wrap gap-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => { void runAction('resolve', hostsRefreshAddresses) }}
+                  disabled={uiBusy}
+                  title="Запросить актуальные адреса через DoH и проверить их TLS-рукопожатием с нужным доменом (обычно 1–2 минуты)"
+                >
+                  {busyAction === 'resolve'
+                    ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    : <Globe className="h-3.5 w-3.5" />}
+                  Обновить адреса
+                </Button>
                 <Button
                   size="sm"
                   variant="outline"
@@ -445,27 +467,50 @@ const Hosts: React.FC = () => {
             </Card>
           )}
 
-        {skippedCount > 0 && !legacyPresent && !status?.legacy.skipNet && (
+        {(skippedCount > 0 || autoDisabledCount > 0) &&
+          !legacyPresent &&
+          !status?.legacy.skipNet && (
           <Card className="border-amber-500/40 bg-amber-500/5">
             <CardContent className="flex flex-wrap items-center justify-between gap-3 pt-4">
               <div className="min-w-0">
                 <div className="flex items-center gap-2 text-sm font-medium">
                   <Info className="h-4 w-4 text-amber-400" />
-                  Пропущено недоступных адресов: {skippedCount}
+                  {skippedCount > 0
+                    ? `Пропущено недоступных адресов: ${skippedCount}`
+                    : `Автоматически выключено сервисов: ${autoDisabledCount}`}
                 </div>
+                {autoDisabledCount > 0 && skippedCount > 0 && (
+                  <div className="mt-0.5 text-[11px] text-muted-foreground">
+                    Автоматически выключено сервисов: {autoDisabledCount}
+                  </div>
+                )}
                 <div className="mt-0.5 text-[11px] text-muted-foreground">
                   Эти IP не отвечают на порту 443 и не записываются в hosts — иначе каждое
-                  соединение ждало бы таймаут. Смените DNS-профиль или обновите каталог.
+                  соединение ждало бы таймаут. Нажмите «Подобрать живые»: SkipNet запросит
+                  актуальные адреса через DoH и проверит каждый TLS-рукопожатием
+                  (обычно 1–2 минуты).
                 </div>
               </div>
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => { void runAction('recheck', () => hostsApply(true)) }}
-                disabled={uiBusy}
-              >
-                Проверить адреса снова
-              </Button>
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  size="sm"
+                  onClick={() => { void runAction('resolve', hostsRefreshAddresses) }}
+                  disabled={uiBusy}
+                >
+                  {busyAction === 'resolve'
+                    ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    : <Globe className="h-3.5 w-3.5" />}
+                  Подобрать живые
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => { void runAction('recheck', () => hostsApply(true)) }}
+                  disabled={uiBusy}
+                >
+                  Проверить снова
+                </Button>
+              </div>
             </CardContent>
           </Card>
         )}

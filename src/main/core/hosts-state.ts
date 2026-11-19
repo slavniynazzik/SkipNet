@@ -15,6 +15,9 @@ import { dataDir } from '../utils/dirs'
 
 const STATE_FILE = 'hosts-state.json'
 
+const HOSTNAME_RE =
+  /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:\.(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?))*$/i
+
 function hasAnswers(service: HostsService, profileId: string): boolean {
   return (service.domains ?? []).some((domain) => (domain.answers[profileId]?.length ?? 0) > 0)
 }
@@ -98,6 +101,43 @@ export function normalizeHostsState(input: unknown, catalog: HostsCatalog): Host
       ]
     : []
 
+  // Verified overrides are IPv4 only: mixing A and AAAA pins makes clients
+  // prefer IPv6 on networks where it is broken, which is exactly the
+  // "everything hangs" symptom we are trying to remove.
+  const resolvedIps: Record<string, string[]> = {}
+  if (raw.resolvedIps && typeof raw.resolvedIps === 'object' && !Array.isArray(raw.resolvedIps)) {
+    for (const [hostname, value] of Object.entries(raw.resolvedIps as Record<string, unknown>)) {
+      const host = hostname.trim().toLowerCase()
+      if (!HOSTNAME_RE.test(host) || !Array.isArray(value)) continue
+      const ips = [
+        ...new Set(
+          value
+            .filter((ip): ip is string => typeof ip === 'string')
+            .map((ip) => ip.trim())
+            .filter((ip) => isIP(ip) === 4)
+        )
+      ].slice(0, 4)
+      if (ips.length > 0) resolvedIps[host] = ips
+    }
+  }
+
+  const restoreSelection: Record<string, HostsSelection> = {}
+  if (
+    raw.restoreSelection &&
+    typeof raw.restoreSelection === 'object' &&
+    !Array.isArray(raw.restoreSelection)
+  ) {
+    for (const service of catalog.services) {
+      const value = (raw.restoreSelection as Record<string, unknown>)[service.id]
+      if (typeof value !== 'string' || value === 'off') continue
+      if (service.kind === 'hosts') {
+        if (value === 'hosts') restoreSelection[service.id] = 'hosts'
+      } else if (profileIds.has(value)) {
+        restoreSelection[service.id] = value
+      }
+    }
+  }
+
   return {
     version: 1,
     catalogVersion: catalog.meta.version,
@@ -105,6 +145,9 @@ export function normalizeHostsState(input: unknown, catalog: HostsCatalog): Host
     defaultDnsProfile: defaultProfile,
     adobeBlock: raw.adobeBlock === true,
     skippedIps,
+    resolvedIps,
+    resolvedAt: typeof raw.resolvedAt === 'string' ? raw.resolvedAt : undefined,
+    restoreSelection,
     appliedAt: typeof raw.appliedAt === 'string' ? raw.appliedAt : undefined,
     renderedHash: typeof raw.renderedHash === 'string' ? raw.renderedHash : undefined
   }

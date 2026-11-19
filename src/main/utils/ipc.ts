@@ -55,6 +55,7 @@ import {
   importLegacyHostsBlocks,
   openHostsFile,
   reapplyHostsState,
+  refreshHostsAddresses,
   refreshHostsCatalog,
   restoreLatestHostsBackup,
   setHostsAdobeBlock,
@@ -357,6 +358,7 @@ export function registerIpcMainHandlers(): void {
   ipcMain.handle('hosts:setAdobe', h((enabled) => setHostsAdobeBlock(Boolean(enabled))))
   ipcMain.handle('hosts:importLegacy', h(() => importLegacyHostsBlocks()))
   ipcMain.handle('hosts:apply', h((force) => reapplyHostsState(force === true)))
+  ipcMain.handle('hosts:refreshAddresses', h(() => refreshHostsAddresses()))
   ipcMain.handle('hosts:restoreLatest', h(() => restoreLatestHostsBackup()))
   ipcMain.handle('hosts:openFile', h(() => openHostsFile()))
   ipcMain.handle('hosts:flushDns', h(() => flushHostsDns()))

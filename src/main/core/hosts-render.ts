@@ -75,6 +75,20 @@ export interface SelectedHostsEntry {
   ips: string[]
 }
 
+/**
+ * Addresses that will actually be written for a hostname. Verified DoH results
+ * (`state.resolvedIps`) win over the frozen catalog snapshot; the catalog stays
+ * as a fallback for hostnames the resolver could not verify.
+ */
+export function effectiveEntryIps(
+  state: HostsState,
+  hostname: string,
+  fallback: string[]
+): string[] {
+  const override = state.resolvedIps?.[hostname.toLowerCase()]
+  return override && override.length > 0 ? override : fallback
+}
+
 /** Hostnames and addresses a service would write for the given selection. */
 export function selectedEntries(
   service: HostsService,
@@ -114,11 +128,12 @@ export function renderManagedBlock(catalog: HostsCatalog, state: HostsState): Re
 
     const serviceLines: string[] = []
     for (const entry of selectedEntries(service, selection)) {
-      if (entry.ips.length === 0) {
+      const entryIps = effectiveEntryIps(state, entry.hostname, entry.ips)
+      if (entryIps.length === 0) {
         warnings.push(`${service.name}: нет адресов для профиля ${selection}`)
         continue
       }
-      const usable = entry.ips.filter((ip) => !skipped.has(ip.toLowerCase()))
+      const usable = entryIps.filter((ip) => !skipped.has(ip.toLowerCase()))
       if (usable.length === 0) continue
       for (const ip of usable) {
         const key = `${ip.toLowerCase()} ${entry.hostname}`

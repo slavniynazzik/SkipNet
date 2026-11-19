@@ -258,6 +258,8 @@ export const hostsImportLegacy = (): Promise<HostsOperationResult> =>
   invoke('hosts:importLegacy')
 export const hostsApply = (force = false): Promise<HostsOperationResult> =>
   invoke('hosts:apply', force)
+export const hostsRefreshAddresses = (): Promise<HostsOperationResult> =>
+  invoke('hosts:refreshAddresses')
 export const hostsRestoreLatest = (): Promise<HostsOperationResult> =>
   invoke('hosts:restoreLatest')
 export const hostsOpenFile = (): Promise<void> => invoke('hosts:openFile')

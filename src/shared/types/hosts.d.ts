@@ -67,6 +67,20 @@ interface HostsState {
    * out of the managed block until a later probe succeeds.
    */
   skippedIps?: string[]
+  /**
+   * hostname → verified addresses found by the DoH refresh. When present for a
+   * hostname, these replace the addresses frozen in the catalog, which is what
+   * keeps pins alive across catalog snapshots.
+   */
+  resolvedIps?: Record<string, string[]>
+  /** ISO timestamp of the last DoH refresh. */
+  resolvedAt?: string
+  /**
+   * service id → the selection that was active before the health check turned
+   * it off. Kept so a later DoH refresh can bring the service back instead of
+   * losing the user's profile choice.
+   */
+  restoreSelection?: Record<string, HostsSelection>
   appliedAt?: string
   renderedHash?: string
 }
