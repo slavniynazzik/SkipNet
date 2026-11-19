@@ -25,3 +25,6 @@ latest.yml
 
 # PyInstaller intermediates
 .pyi-build/
+
+# Local agent/skill bundles (not part of the app)
+.agents/
