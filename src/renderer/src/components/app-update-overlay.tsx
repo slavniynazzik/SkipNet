@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Dialog } from 'radix-ui'
 import { Loader2, Download, Sparkles, X } from 'lucide-react'
-import { appInstallUpdate, type AppUpdateInfo } from '@renderer/utils/ipc'
+import { appInstallUpdate } from '@renderer/utils/ipc'
 import { useUpdateCheck } from '@renderer/hooks/use-update-check'
 import { Button } from '@renderer/components/ui/button'
 
@@ -11,14 +11,10 @@ export default function AppUpdateOverlay(): React.ReactElement | null {
   // Shared cached check. The `autoCheckUpdate` gate lives in the hook, so a
   // user who disabled automatic checks never sees a flash of the overlay on
   // startup, and the hourly refresh reuses the same SWR entry instead of a
-  // second fetch path.
+  // second fetch path. A manual check from Settings is stored by the same
+  // hook for the session, so the overlay appears even with the gate off.
   const appUpdates = useUpdateCheck('app')
-  const { info: sharedInfo, enabled, refresh, dismiss } = appUpdates
-  // Manual check from Settings can surface an update even when automatic
-  // checks are disabled. The page dispatches the freshly fetched info; it is
-  // only used while the shared cache has no entry (gate off).
-  const [manualInfo, setManualInfo] = useState<AppUpdateInfo | null>(null)
-  const info = sharedInfo ?? manualInfo
+  const { info, enabled, refresh, dismiss, clearManual, recoverFromTagMismatch } = appUpdates
 
   const [installing, setInstalling] = useState(false)
   const installingRef = useRef(false)
@@ -34,15 +30,6 @@ export default function AppUpdateOverlay(): React.ReactElement | null {
     }, POLL_INTERVAL_MS)
     return () => window.clearInterval(id)
   }, [enabled, refresh])
-
-  useEffect(() => {
-    const handler = (event: Event): void => {
-      const detail = (event as CustomEvent<AppUpdateInfo>).detail
-      if (detail) setManualInfo(detail)
-    }
-    window.addEventListener('skipnet:app-update-available', handler)
-    return () => window.removeEventListener('skipnet:app-update-available', handler)
-  }, [])
 
   useEffect(() => {
     // Re-show the overlay when a *newer* release arrives after the user
@@ -68,10 +55,14 @@ export default function AppUpdateOverlay(): React.ReactElement | null {
       await appInstallUpdate(info.tag)
       // Main process will quit SkipNet within ~1 s. We just keep the
       // spinner up; user perceives "downloading… closing…".
+      clearManual()
     } catch (e) {
       installingRef.current = false
       setInstalling(false)
-      setError(e instanceof Error ? e.message : String(e))
+      // A stale banner tag is recoverable: refresh the check result (and the
+      // banner) so a second click installs the tag main actually expects.
+      const recovered = await recoverFromTagMismatch(e)
+      if (!recovered) setError(e instanceof Error ? e.message : String(e))
     }
   }
 
@@ -92,7 +83,6 @@ export default function AppUpdateOverlay(): React.ReactElement | null {
     setDismissing(false)
     if (!ok) return
     setClosing(true)
-    if (!sharedInfo) setManualInfo({ ...info, dismissed: true })
   }
 
   if (!visible || !info) return null

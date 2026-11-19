@@ -23,11 +23,28 @@ const themeLabels: Record<AppTheme, string> = {
   dark: 'Тёмная'
 }
 
+/**
+ * Suffix for a version row: an explicit check can find an update even with
+ * automatic checks off, and the result must stay visible after navigating
+ * away from Settings.
+ */
+function availableLabel(
+  info: { hasUpdate: boolean; tag?: string; latest?: string } | undefined
+): string {
+  if (!info?.hasUpdate || !info.tag) return ''
+  return ` · доступно ${info.latest ? `v${info.latest}` : info.tag}`
+}
+
 const Settings: React.FC = () => {
   const { appConfig, patchAppConfig } = useAppConfig()
   const appUpdates = useUpdateCheck('app')
   const tgwsUpdates = useUpdateCheck('tgws')
   const zapretUpdates = useUpdateCheck('zapret')
+  // Explicit checks store their result for the session, so these survive the
+  // route to Telegram/Zapret/Home and the banners there pick them up too.
+  const appUpdate = appUpdates.info
+  const tgwsUpdate = tgwsUpdates.info
+  const zapretUpdate = zapretUpdates.info
   const [checkingUpdates, setCheckingUpdates] = useState(false)
   const checkingRef = useRef(false)
   const [appVersion, setAppVersion] = useState<string | null>(null)
@@ -88,11 +105,6 @@ const Settings: React.FC = () => {
             ? `SkipNet: доступно v${app.value.latest}`
             : `SkipNet: v${app.value.installed} — актуально`
         )
-        if (app.value.hasUpdate) {
-          window.dispatchEvent(
-            new CustomEvent('skipnet:app-update-available', { detail: app.value })
-          )
-        }
       } else {
         failed.push(
           `SkipNet: ${app.reason instanceof Error ? app.reason.message : String(app.reason)}`
@@ -255,6 +267,7 @@ const Settings: React.FC = () => {
               <Label className="text-sm">SkipNet</Label>
               <span className="text-xs text-muted-foreground">
                 Установлено: v{appVersion ?? '…'}
+                {availableLabel(appUpdate)}
               </span>
             </div>
           </div>
@@ -263,6 +276,7 @@ const Settings: React.FC = () => {
               <Label className="text-sm">Telegram WS (TgWsProxy)</Label>
               <span className="text-xs text-muted-foreground">
                 Установлено: v{appConfig?.tgws?.installedVersion ?? BUNDLED_TGWS_VERSION}
+                {availableLabel(tgwsUpdate)}
               </span>
             </div>
           </div>
@@ -271,6 +285,7 @@ const Settings: React.FC = () => {
               <Label className="text-sm">Zapret</Label>
               <span className="text-xs text-muted-foreground">
                 Установлено: v{appConfig?.zapret?.installedVersion ?? BUNDLED_ZAPRET_VERSION}
+                {availableLabel(zapretUpdate)}
               </span>
             </div>
           </div>

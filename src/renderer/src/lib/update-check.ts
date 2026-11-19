@@ -75,3 +75,61 @@ export function updateBannerVisible(
 ): boolean {
   return !!info && info.hasUpdate && !!info.tag && !info.dismissed && !sessionDismissed
 }
+
+/**
+ * Release tag main's installers accept, mirroring `RELEASE_TAG_RE` in
+ * `src/main/core/update-integrity.ts`. Anything else is never interpolated
+ * into a GitHub API path, so the renderer must not try to reuse it.
+ */
+const RELEASE_TAG_RE = /^v?\d+\.\d+\.\d+$/
+
+/**
+ * `assertExpectedReleaseTag` appends the tag main last cached, e.g.
+ * `Запрошенная версия не совпадает с последней проверенной (v1.5.0) — ...`.
+ * A mismatch without the parenthesised tag carries no recovery information.
+ */
+const EXPECTED_TAG_RE = /не совпадает с последней проверенной\s*\(([^)]+)\)/
+
+function errorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message
+  if (typeof error === 'string') return error
+  if (error && typeof error === 'object') {
+    const message = (error as { message?: unknown }).message
+    if (typeof message === 'string') return message
+  }
+  return ''
+}
+
+/**
+ * Extract the tag main will accept on the next install attempt.
+ *
+ * Used after an install rejects with a tag mismatch: the renderer's banner is
+ * stale, so it refreshes its cache and must then show this tag for a retry to
+ * succeed. Returns `undefined` for every other error, including a mismatch
+ * message whose parenthesised value is not a valid release tag.
+ */
+export function expectedTagFromError(error: unknown): string | undefined {
+  const match = EXPECTED_TAG_RE.exec(errorMessage(error))
+  const tag = match?.[1]?.trim()
+  return tag && RELEASE_TAG_RE.test(tag) ? tag : undefined
+}
+
+/**
+ * Which check result a page renders.
+ *
+ * With automatic checks enabled the shared SWR cache is authoritative, and a
+ * manual result only bridges the gap while the cache is still resolving. With
+ * the gate off the SWR key does not exist, so the explicit check is the only
+ * source of truth and must win over a stale cache entry left from before the
+ * switch was turned off.
+ *
+ * The manual result keeps its `dismissed` flag; `updateBannerVisible` still
+ * decides whether it is shown, so a session dismissal survives navigation.
+ */
+export function resolveUpdateInfo<T extends { hasUpdate: boolean }>(
+  enabled: boolean,
+  shared: T | undefined,
+  manual: T | undefined
+): T | undefined {
+  return enabled ? shared ?? manual : manual ?? shared
+}

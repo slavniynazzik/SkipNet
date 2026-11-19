@@ -76,6 +76,9 @@ const Zapret: React.FC = () => {
   }, [])
 
   const startTest = useCallback((): void => {
+    // Installing rewrites the bundle on disk; starting a sweep mid-install
+    // would test the old strategies and then lose them on the swap.
+    if (installingRef.current) return
     if (useZapretTestStore.getState().isRunning) return
     // Optimistically flip isRunning so the UI dims immediately — the
     // first 'starting' IPC tick will arrive within ~100ms and reconcile.
@@ -125,6 +128,10 @@ const Zapret: React.FC = () => {
     })
     try {
       const res = await zapretInstallUpdate(updateInfo.tag)
+      // Drop the manual result before the re-check: the freshly installed
+      // bundle is the new baseline, and a failed check must not bring the old
+      // banner back.
+      updateCheck.clearManual()
       toast.success('Zapret обновлён', {
         id: tId,
         description: `Версия ${res.installedVersion ?? updateInfo.latest} — стратегий: ${res.strategies}`,
@@ -152,7 +159,13 @@ const Zapret: React.FC = () => {
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
-      toast.error('Не удалось обновить Zapret', { id: tId, description: msg })
+      // Stale banner tag: refresh the cached check so the banner carries the
+      // tag main expects and a second click succeeds.
+      if (await updateCheck.recoverFromTagMismatch(e)) {
+        toast.dismiss(tId)
+      } else {
+        toast.error('Не удалось обновить Zapret', { id: tId, description: msg })
+      }
     } finally {
       setInstalling(false)
       installingRef.current = false
@@ -391,7 +404,12 @@ const Zapret: React.FC = () => {
                 variant="outline"
                 size="sm"
                 onClick={startTest}
-                disabled={strategies.length === 0}
+                disabled={strategies.length === 0 || installing}
+                title={
+                  installing
+                    ? 'Устанавливаем обновление — тест стратегий временно недоступен'
+                    : undefined
+                }
                 className="shrink-0"
               >
                 <FlaskConical className="h-3.5 w-3.5" />

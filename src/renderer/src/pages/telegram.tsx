@@ -140,6 +140,10 @@ const TelegramPage: React.FC = () => {
     })
     try {
       const res = await tgwsInstallUpdate(updateInfo.tag)
+      // The freshly installed version is the new baseline; forget the manual
+      // result before the re-check so a failed check cannot resurrect the
+      // banner for the release we just installed.
+      updateCheck.clearManual()
       const mb = (res.sizeBytes / (1024 * 1024)).toFixed(1)
       toast.success('TgWsProxy обновлён', {
         id: tId,
@@ -163,7 +167,13 @@ const TelegramPage: React.FC = () => {
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
-      toast.error('Не удалось обновить TgWsProxy', { id: tId, description: msg })
+      // Stale banner tag: refresh the cached check so the banner carries the
+      // tag main expects and a second click succeeds.
+      if (await updateCheck.recoverFromTagMismatch(e)) {
+        toast.dismiss(tId)
+      } else {
+        toast.error('Не удалось обновить TgWsProxy', { id: tId, description: msg })
+      }
     } finally {
       setInstalling(false)
       installingRef.current = false
