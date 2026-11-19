@@ -76,8 +76,9 @@ async function ensureSecret(current: string | undefined): Promise<string> {
   }
   const fresh = randomBytes(16).toString('hex')
   log('warn', `secret invalid (len=${current?.length ?? 0}) — regenerated and persisted`)
-  const cfg = await getAppConfig()
-  await patchAppConfig({ tgws: { ...cfg.tgws!, secret: fresh } })
+  // Leaf-only patch: the rest of `tgws` is already persisted, and sending the
+  // whole section can resurrect stale fields captured before a concurrent edit.
+  await patchAppConfig({ tgws: { secret: fresh } })
   activeSecret = fresh
   return fresh
 }

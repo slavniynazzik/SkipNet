@@ -20,7 +20,29 @@ export interface IpListSnapshot {
 export interface IpListPatch {
   setIds?: string[]
   customCidrs?: string[]
+  /** Accepted as an alias for host lines; validated exactly like `customCidrs`. */
+  customHosts?: string[]
   replace?: boolean
+}
+
+/**
+ * Renderer input is untrusted. A string where an array is expected used to
+ * fail deep inside `.flatMap` with an opaque `TypeError`; reject it up front
+ * with a message the UI can show.
+ */
+function readStringArray(value: unknown, field: string): string[] {
+  if (value === undefined) return []
+  if (!Array.isArray(value)) {
+    throw new Error(`Некорректные данные списка: «${field}» должен быть массивом строк.`)
+  }
+  return value.map((item, index) => {
+    if (typeof item !== 'string') {
+      throw new Error(
+        `Некорректные данные списка: «${field}[${index}]» должен быть строкой.`
+      )
+    }
+    return item
+  })
 }
 
 // list-general.txt is consumed by Zapret as a hostlist (SNI / Host
@@ -220,22 +242,31 @@ function safeSize(file: string): number {
  * the user can restore it.
  */
 export function applyIpListPatch(patch: IpListPatch): IpListSnapshot {
+  // Validate the IPC payload before touching the bundle or the filesystem.
+  const setIds = readStringArray(patch.setIds, 'setIds')
+  const customCidrs = readStringArray(patch.customCidrs, 'customCidrs')
+  const customHosts = readStringArray(patch.customHosts, 'customHosts')
+  if (patch.replace !== undefined && typeof patch.replace !== 'boolean') {
+    throw new Error('Некорректные данные списка: «replace» должен быть true или false.')
+  }
+  const replace = patch.replace === true
+
   ensureDirOrThrow()
   ensureBackup()
   const file = listFile()
 
-  const existing = patch.replace ? [] : readLines(file).filter(isValidListEntry)
+  const existing = replace ? [] : readLines(file).filter(isValidListEntry)
 
   const fromSets: string[] = []
-  if (patch.setIds && patch.setIds.length) {
+  if (setIds.length) {
     const byId = new Map(CURATED_IP_SETS.map((s) => [s.id, s]))
-    for (const id of patch.setIds) {
+    for (const id of setIds) {
       const s = byId.get(id)
       if (s) fromSets.push(...s.cidrs)
     }
   }
 
-  const fromCustom = (patch.customCidrs ?? [])
+  const fromCustom = [...customCidrs, ...customHosts]
     .flatMap((s) => s.split(/[\s,;]+/))
     .map((s) => s.trim())
     .filter(isValidListEntry)
@@ -247,11 +278,11 @@ export function applyIpListPatch(patch: IpListPatch): IpListSnapshot {
   // updates never touch, so a later "Списки хостов" refresh cannot delete
   // curated/custom entries. `replace` resets it to just this patch.
   const userFile = userListFile()
-  const existingUser = patch.replace ? [] : readLines(userFile).filter(isValidListEntry)
+  const existingUser = replace ? [] : readLines(userFile).filter(isValidListEntry)
   // One-time migration: entries added by older SkipNet builds were written
   // straight into list-general.txt. Anything not present in the pristine
   // backup is user-added and must survive the next upstream refresh.
-  const legacyUserEntries = patch.replace
+  const legacyUserEntries = replace
     ? []
     : (() => {
         const original = new Set(readLines(backupFile()).filter(isValidListEntry))

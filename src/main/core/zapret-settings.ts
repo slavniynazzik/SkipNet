@@ -138,7 +138,6 @@ export async function setGameFilter(input: SetGameFilterInput): Promise<SetGameF
 
   await patchAppConfig({
     zapret: {
-      ...(cfg.zapret as ZapretConfig),
       gameFilter: next.enabled,
       gameFilterMode: next.mode,
       gameFilterTcpRange: next.tcpRange,

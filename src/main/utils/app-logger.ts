@@ -1,6 +1,5 @@
 import { appendFile, mkdir, readdir, rename, stat, unlink } from 'node:fs/promises'
 import path from 'node:path'
-import { getAppConfigSync } from '../config'
 import { logDir, logFileName } from './dirs'
 import { redactSecrets } from './redact'
 import { broadcast } from './broadcast'
@@ -16,14 +15,33 @@ let writeQueue: Promise<void> = Promise.resolve()
 
 /**
  * Exact values that must be masked in addition to the generic patterns.
- * Read lazily: `appLog` can fire from `uncaughtException` before the app is
- * ready, so a failure to read config must never break logging.
+ *
+ * Resolved through a provider registered by the config layer and cached here:
+ * reading + YAML-parsing `config.yaml` on every log line made `appLog` (which
+ * can fire hundreds of times per second from winws output) do disk I/O. The
+ * config layer calls `invalidateAppLogSecrets()` after a load or a patch that
+ * may rotate `tgws.secret`, so a rotated key is masked again immediately.
  */
+let cachedSecrets: string[] | null = null
+let secretProvider: (() => string[]) | null = null
+
+export function setAppLogSecretProvider(provider: (() => string[]) | null): void {
+  secretProvider = provider
+  cachedSecrets = null
+}
+
+export function invalidateAppLogSecrets(): void {
+  cachedSecrets = null
+}
+
 function currentSecrets(): string[] {
+  if (cachedSecrets) return cachedSecrets
   try {
-    const secret = getAppConfigSync().tgws?.secret
-    return typeof secret === 'string' && secret.length >= 8 ? [secret] : []
+    cachedSecrets = secretProvider ? secretProvider() : []
+    return cachedSecrets
   } catch {
+    // Do not cache a failure: the first call can run from
+    // `uncaughtException` before the profile is readable.
     return []
   }
 }
@@ -114,22 +132,12 @@ export async function pruneLogFiles(
  * Startup hook: honour `maxLogDays` from the saved config and drop old files.
  * Failures are swallowed — logging must never block startup.
  */
-export async function initAppLog(): Promise<void> {
-  let days = DEFAULT_MAX_LOG_DAYS
-  try {
-    const configured = getAppConfigSync().maxLogDays
-    if (typeof configured === 'number' && Number.isFinite(configured) && configured > 0) {
-      days = configured
-    }
-  } catch {
-    /* defaults */
-  }
+export async function initAppLog(maxDays?: number): Promise<void> {
+  const days =
+    typeof maxDays === 'number' && Number.isFinite(maxDays) && maxDays > 0
+      ? Math.floor(maxDays)
+      : DEFAULT_MAX_LOG_DAYS
   await pruneLogFiles(logDir(), days)
-}
-
-/** Await every queued line. Used by tests and by the quit sequence. */
-export function flushLogs(): Promise<void> {
-  return writeQueue
 }
 
 function queueWrite(line: string): void {

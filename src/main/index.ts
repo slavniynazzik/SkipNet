@@ -17,7 +17,7 @@ import { startTgws, stopTgws } from './core/tgws'
 import { startZapret, stopZapret } from './core/zapret'
 import { appLog } from './utils/app-logger'
 import { enableAutoRun, disableAutoRun } from './sys/autoRun'
-import { isRunningAsAdmin } from './utils/elevation'
+import { isRunningAsAdmin } from './utils/elevated'
 import { consumeResumeZapretAfterUpdate } from './core/app-updater'
 import { initWallpaperProtocol, registerWallpaperScheme } from './core/wallpaper'
 import { migrateLegacyData } from './utils/dirs'
@@ -234,6 +234,8 @@ let cleanupRan = false
 let cleanupPromise: Promise<void> | null = null
 let cleanupDone = false
 let isQuitting = false
+/** The synchronous sweep runs at most once per process lifetime. */
+let syncKillRan = false
 
 /**
  * Synchronous, fire-and-forget cleanup that runs when the app quits. Kills
@@ -262,6 +264,11 @@ let isQuitting = false
  * errors (services that aren't loaded, processes that no longer exist, etc.).
  */
 function syncKillChildren(): void {
+  // `before-quit`, `will-quit` and the process `exit` hook all call this. Only
+  // the first call does work: repeating `taskkill`/`sc stop` after cleanup
+  // risks killing a process the relaunched instance already owns.
+  if (syncKillRan) return
+  syncKillRan = true
   if (process.platform !== 'win32') return
   try {
     const opts = { windowsHide: true, timeout: 4000 } as const

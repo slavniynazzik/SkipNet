@@ -350,16 +350,6 @@ export async function killOwnedComponent(
   return [...new Set([...trackedKilled, ...ownedKilled])]
 }
 
-export function killOwnedComponentSync(
-  component: TrackedProcess['component'],
-  imageNames: readonly string[],
-  roots: readonly string[] = ownedProcessRoots()
-): number[] {
-  const trackedKilled = killTrackedProcessesSync(component)
-  const ownedKilled = killOwnedImagesSync(imageNames, roots)
-  return [...new Set([...trackedKilled, ...ownedKilled])]
-}
-
 /**
  * Shutdown/update path: every tracked PID (both components) first, then the
  * owned-image fallback for both binaries. Runs synchronously because it is

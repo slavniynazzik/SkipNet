@@ -29,9 +29,14 @@ export const MANIFEST_NAME = 'binaries.sha256'
  * Extensions treated as executable payload. Used both to enforce manifest
  * coverage (`every executable in the component must be listed`) and by the
  * updaters to regenerate entries for a freshly installed bundle.
+ *
+ * `.bin` covers the WinDivert filter payloads (`tls_clienthello_*`,
+ * `quic_initial_*`, `stun*`). winws.exe reads them at runtime — a swapped file
+ * changes what it sends — so they belong in the same trust boundary.
  */
 const EXECUTABLE_EXTENSIONS = new Set([
   '.bat',
+  '.bin',
   '.cmd',
   '.com',
   '.cpl',

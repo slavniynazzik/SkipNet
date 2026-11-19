@@ -45,6 +45,21 @@ interface AppConfig {
   zapret?: ZapretConfig
 }
 
+/**
+ * Deep-partial shape for config patches.
+ *
+ * `Partial<AppConfig>` only makes `tgws`/`zapret` optional as whole objects, so
+ * a leaf-only patch (`{ zapret: { checkUpdates: true } }`) was rejected by the
+ * compiler even though `deepMerge` handles it correctly.
+ */
+type DeepPartial<T> = T extends (infer U)[]
+  ? U[]
+  : T extends object
+    ? { [K in keyof T]?: DeepPartial<T[K]> }
+    : T
+
+type AppConfigPatch = DeepPartial<AppConfig>
+
 interface WallpaperConfig {
   enabled: boolean
   /** Where the wallpaper comes from. */

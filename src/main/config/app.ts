@@ -9,9 +9,19 @@ import { readFileSync, existsSync } from 'fs'
 import { is } from '@electron-toolkit/utils'
 import { enableAutoRun, disableAutoRun, type AutoRunResult } from '../sys/autoRun'
 import { renameWithRetry } from '../utils/fs-retry'
+import { invalidateAppLogSecrets, setAppLogSecretProvider } from '../utils/app-logger'
 
 let appConfig: AppConfig | undefined
 let writePromise: Promise<void> = Promise.resolve()
+
+// The log layer caches the redaction secret (it is consulted for every line).
+// Resolve it lazily from the same sync reader `appLog` used before, so a log
+// emitted from `uncaughtException` still works before the app is ready.
+setAppLogSecretProvider(() => {
+  // Prefer the already-loaded in-memory config: no disk read per log line.
+  const secret = (appConfig ?? getAppConfigSync()).tgws?.secret
+  return typeof secret === 'string' && secret.length >= 8 ? [secret] : []
+})
 
 /**
  * Run a config write inside the same serialized queue as `patchAppConfig`.
@@ -89,6 +99,9 @@ async function readConfigFromDisk(): Promise<AppConfig | null> {
 export async function getAppConfig(force = false): Promise<AppConfig> {
   if (force || !appConfig) {
     appConfig = (await readConfigFromDisk()) ?? structuredClone(defaultConfig)
+    // The file (and therefore `tgws.secret`) may have changed since the last
+    // log line; drop the cached redaction value.
+    invalidateAppLogSecrets()
   }
   if (!appConfig || typeof appConfig !== 'object') appConfig = structuredClone(defaultConfig)
 
@@ -149,6 +162,7 @@ export async function getAppConfig(force = false): Promise<AppConfig> {
         activeStrategy: undefined
       }
     }
+    invalidateAppLogSecrets()
     try {
       await queueConfigWrite()
     } catch { /* noop — best-effort, will retry on next patch */ }
@@ -193,6 +207,7 @@ export async function getAppConfig(force = false): Promise<AppConfig> {
         activeStrategy: undefined
       }
     }
+    invalidateAppLogSecrets()
     // Persist the migrated config immediately so a crash before the next
     // patchAppConfig call doesn't roll back the migration. Queued, so a
     // concurrent patch cannot be overwritten by this stale snapshot.
@@ -208,7 +223,7 @@ export async function getAppConfig(force = false): Promise<AppConfig> {
   return appConfig
 }
 
-export async function patchAppConfig(patch: Partial<AppConfig>): Promise<void> {
+export async function patchAppConfig(patch: AppConfigPatch): Promise<void> {
   // Validate BEFORE taking the write queue: an invalid patch must neither
   // mutate the in-memory config nor reach the disk. Throws
   // `ConfigValidationError` with the offending field path; `ipc.ts` turns it
@@ -220,89 +235,110 @@ export async function patchAppConfig(patch: Partial<AppConfig>): Promise<void> {
   // patches are fired back-to-back (the renderer does not await them), which
   // made autostart/tray toggles race and skip the matching side effect.
   const apply = async (): Promise<void> => {
+    // Snapshot before the merge: if any part of the write/side-effect chain
+    // fails, `getAppConfig()` must never report a value that never reached
+    // disk (or that Windows rejected).
+    const snapshot = appConfig ? structuredClone(appConfig) : undefined
     const prevAutoLaunch = appConfig?.autoLaunch
     const prevDisableTray = appConfig?.disableTray
     const prevHideTaskbarIcon = appConfig?.hideTaskbarIcon
     const prevShowShortcut = appConfig?.showWindowShortcut
     const prevTgwsShortcut = appConfig?.tgwsToggleShortcut
     const prevZapretShortcut = appConfig?.zapretToggleShortcut
-
-    appConfig = deepMerge(appConfig ?? structuredClone(defaultConfig), cleanPatch)
-    await safeWriteConfig(stringifyYaml(appConfig))
-
-    // Windows is the source of truth for the logon task. If registration or
-    // removal fails, roll the persisted flag back and surface the reason:
-    // silently keeping `autoLaunch: true` made the toggle lie until the next
-    // failed boot attempt.
+    let persisted = false
     let autoLaunchError: Error | null = null
-    if (cleanPatch.autoLaunch !== undefined && cleanPatch.autoLaunch !== prevAutoLaunch) {
-      let result: AutoRunResult
-      try {
-        result = cleanPatch.autoLaunch ? await enableAutoRun() : await disableAutoRun()
-      } catch (e) {
-        result = { ok: false, message: e instanceof Error ? e.message : String(e) }
-      }
-      if (!result.ok) {
-        appConfig = { ...appConfig, autoLaunch: prevAutoLaunch ?? false }
-        try {
-          await safeWriteConfig(stringifyYaml(appConfig))
-        } catch {
-          /* best effort — the in-memory flag already agrees with Windows */
-        }
-        autoLaunchError = new Error(result.message)
-      }
-    }
-    // React to tray toggle: create or destroy tray on the fly so the user
-    // doesn't have to relaunch the app for the change to take effect.
-    if (cleanPatch.disableTray !== undefined && cleanPatch.disableTray !== prevDisableTray) {
-      try {
-        const tray = await import('../resolve/tray')
-        if (cleanPatch.disableTray) tray.destroyTray()
-        else await tray.createTray()
-      } catch { /* noop */ }
-    }
-    const disableTrayChanged =
-      cleanPatch.disableTray !== undefined && cleanPatch.disableTray !== prevDisableTray
-    const hideChanged =
-      cleanPatch.hideTaskbarIcon !== undefined &&
-      cleanPatch.hideTaskbarIcon !== prevHideTaskbarIcon
-    if (hideChanged || disableTrayChanged) {
-      try {
-        const { applySkipTaskbar } = await import('../resolve/windowVisibility')
-        applySkipTaskbar()
-      } catch { /* noop */ }
-    }
 
-    // Q8: global shortcuts must follow a saved accelerator change without a
-    // restart. `applyShortcuts` unregisters all first and reports collisions.
-    const shortcutsChanged =
-      (cleanPatch.showWindowShortcut !== undefined &&
-        cleanPatch.showWindowShortcut !== prevShowShortcut) ||
-      (cleanPatch.tgwsToggleShortcut !== undefined &&
-        cleanPatch.tgwsToggleShortcut !== prevTgwsShortcut) ||
-      (cleanPatch.zapretToggleShortcut !== undefined &&
-        cleanPatch.zapretToggleShortcut !== prevZapretShortcut)
-    if (shortcutsChanged) {
-      try {
-        const { applyShortcuts } = await import('../resolve/shortcut')
-        applyShortcuts(appConfig)
-      } catch { /* noop */ }
-    }
-
-    // Notify every renderer so config written by the main process (component
-    // installers, secret regeneration, update dismissal) refreshes the UI
-    // immediately instead of waiting for a route remount.
     try {
-      const { BrowserWindow } = await import('electron')
-      for (const win of BrowserWindow.getAllWindows()) {
-        if (!win.isDestroyed()) win.webContents.send('appConfigUpdated')
-      }
-    } catch { /* noop */ }
+      appConfig = deepMerge(appConfig ?? structuredClone(defaultConfig), cleanPatch)
+      // The patch may rotate `tgws.secret`; the log layer must mask the new key.
+      invalidateAppLogSecrets()
+      await safeWriteConfig(stringifyYaml(appConfig))
+      persisted = true
 
-    // Throw only after every side effect and the renderer refresh ran, so the
-    // toggle visibly snaps back to the rolled-back value together with the
-    // error message.
-    if (autoLaunchError) throw autoLaunchError
+      // Windows is the source of truth for the logon task. If registration or
+      // removal fails, surface the reason: silently keeping `autoLaunch: true`
+      // made the toggle lie until the next failed boot attempt.
+      if (cleanPatch.autoLaunch !== undefined && cleanPatch.autoLaunch !== prevAutoLaunch) {
+        let result: AutoRunResult
+        try {
+          result = cleanPatch.autoLaunch ? await enableAutoRun() : await disableAutoRun()
+        } catch (e) {
+          result = { ok: false, message: e instanceof Error ? e.message : String(e) }
+        }
+        if (!result.ok) autoLaunchError = new Error(result.message)
+      }
+      // React to tray toggle: create or destroy tray on the fly so the user
+      // doesn't have to relaunch the app for the change to take effect.
+      if (cleanPatch.disableTray !== undefined && cleanPatch.disableTray !== prevDisableTray) {
+        try {
+          const tray = await import('../resolve/tray')
+          if (cleanPatch.disableTray) tray.destroyTray()
+          else await tray.createTray()
+        } catch { /* noop */ }
+      }
+      const disableTrayChanged =
+        cleanPatch.disableTray !== undefined && cleanPatch.disableTray !== prevDisableTray
+      const hideChanged =
+        cleanPatch.hideTaskbarIcon !== undefined &&
+        cleanPatch.hideTaskbarIcon !== prevHideTaskbarIcon
+      if (hideChanged || disableTrayChanged) {
+        try {
+          const { applySkipTaskbar } = await import('../resolve/windowVisibility')
+          applySkipTaskbar()
+        } catch { /* noop */ }
+      }
+
+      // Q8: global shortcuts must follow a saved accelerator change without a
+      // restart. `applyShortcuts` unregisters all first and reports collisions.
+      const shortcutsChanged =
+        (cleanPatch.showWindowShortcut !== undefined &&
+          cleanPatch.showWindowShortcut !== prevShowShortcut) ||
+        (cleanPatch.tgwsToggleShortcut !== undefined &&
+          cleanPatch.tgwsToggleShortcut !== prevTgwsShortcut) ||
+        (cleanPatch.zapretToggleShortcut !== undefined &&
+          cleanPatch.zapretToggleShortcut !== prevZapretShortcut)
+      if (shortcutsChanged) {
+        try {
+          const { applyShortcuts } = await import('../resolve/shortcut')
+          applyShortcuts(appConfig)
+        } catch { /* noop */ }
+      }
+
+      // Throw only after every side effect ran, so the toggle snaps back
+      // together with the error message.
+      if (autoLaunchError) throw autoLaunchError
+
+      // Notify every renderer so config written by the main process (component
+      // installers, secret regeneration, update dismissal) refreshes the UI
+      // immediately instead of waiting for a route remount.
+      try {
+        const { BrowserWindow } = await import('electron')
+        for (const win of BrowserWindow.getAllWindows()) {
+          if (!win.isDestroyed()) win.webContents.send('appConfigUpdated')
+        }
+      } catch { /* noop */ }
+    } catch (error) {
+      // Restore memory first: a failed write must not leave `getAppConfig()`
+      // reporting the rejected value. If the patch had already reached disk,
+      // put the previous snapshot back there as well (best effort).
+      appConfig = snapshot
+      invalidateAppLogSecrets()
+      if (persisted && snapshot) {
+        try {
+          await safeWriteConfig(stringifyYaml(snapshot))
+        } catch {
+          /* the in-memory value is what the UI reads next */
+        }
+      }
+      // Refresh the renderer with the rolled-back value, then surface the error.
+      try {
+        const { BrowserWindow } = await import('electron')
+        for (const win of BrowserWindow.getAllWindows()) {
+          if (!win.isDestroyed()) win.webContents.send('appConfigUpdated')
+        }
+      } catch { /* noop */ }
+      throw error
+    }
   }
 
   const previous = writePromise

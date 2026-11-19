@@ -173,3 +173,77 @@ describe('strategy sweep cancellation', () => {
     expect(cancelStrategyTest('user')).toBe(false)
   })
 })
+
+describe('strategy sweep resilience (B3)', () => {
+  it('scores a strategy that fails to spawn as zero and continues the sweep', async () => {
+    vi.useFakeTimers()
+    let pid = 200
+    const deps = makeDeps({
+      status: () => ({ state: 'stopped' }),
+      spawnStrategy: (batPath) => {
+        if (batPath.endsWith('general1.bat')) throw new Error('spawn failed')
+        return { pid: (pid += 1) - 1, exitCode: null }
+      }
+    })
+
+    const run = runStrategyTestsWith(deps)
+    // Three strategies; each successful one costs 250 spawn + 4500 warm-up +
+    // 400 cleanup. The failed one returns immediately.
+    await vi.advanceTimersByTimeAsync(20_000)
+    const report = await run
+
+    // One broken strategy must not truncate the report.
+    expect(Object.keys(report.results).sort()).toEqual([
+      'general1.bat',
+      'general2.bat',
+      'general3.bat'
+    ])
+    expect(report.results['general1.bat']).toMatchObject({
+      tested: true,
+      passed: false,
+      okCount: 0,
+      score: 0,
+      totalCount: 10
+    })
+    expect(report.results['general2.bat'].passed).toBe(true)
+    expect(report.results['general3.bat'].passed).toBe(true)
+    expect(report.cancelled).toBeUndefined()
+    expect(isStrategyTestRunning()).toBe(false)
+  })
+
+  it('kills a child spawned by the abort race instead of leaking it', async () => {
+    vi.useFakeTimers()
+    let releaseSpawn: (() => void) | null = null
+    const deps = makeDeps({
+      status: () => ({ state: 'stopped' }),
+      strategies: () => [strategy('general1.bat')],
+      spawnStrategy: () => ({ pid: 501, exitCode: null }),
+      // Let the queued spawn complete, then hold the lock promise so the abort
+      // lands between "child spawned" and "spawnPromise resolved".
+      withZapretLock: async <T,>(fn: () => Promise<T>): Promise<T> => {
+        const result = await fn()
+        if (result) {
+          await new Promise<void>((resolve) => {
+            releaseSpawn = resolve
+          })
+        }
+        return result
+      }
+    })
+
+    const run = runStrategyTestsWith(deps)
+    // 250 ms cleanup sleep happens before the spawn.
+    await vi.advanceTimersByTimeAsync(300)
+    expect(releaseSpawn).not.toBeNull()
+
+    expect(cancelStrategyTest('user')).toBe(true)
+    // Unblock the queued section only after the abort: `testOneStrategy` must
+    // still await it and kill the child it produced.
+    releaseSpawn!()
+    const report = await run
+
+    expect(report.cancelled).toBe(true)
+    expect(deps.killedPids).toContain(501)
+    expect(isStrategyTestRunning()).toBe(false)
+  })
+})

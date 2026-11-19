@@ -210,7 +210,7 @@ export function registerIpcMainHandlers(): void {
   const handlers: Record<InvokeChannel, IpcHandler> = {
     // ---- App config -------------------------------------------------------
     'app:getConfig': h(() => getAppConfig()),
-    'app:patchConfig': h((patch) => patchAppConfig(patch as Partial<AppConfig>)),
+    'app:patchConfig': h((patch) => patchAppConfig(patch as AppConfigPatch)),
     'app:version': h(() => app.getVersion()),
 
     // ---- Theme ------------------------------------------------------------
@@ -316,10 +316,9 @@ export function registerIpcMainHandlers(): void {
     'zapret:setAutoUpdateCheck': h(async (enabled) => {
       const value = Boolean(enabled)
       const actual = setAutoUpdateCheck(value)
-      const cfg = await getAppConfig()
-      if (cfg.zapret) {
-        await patchAppConfig({ zapret: { ...(cfg.zapret as ZapretConfig), checkUpdates: value } })
-      }
+      // Leaf-only patch: never spread a previously-read `zapret` section over
+      // the live config (it would resurrect stale concurrent edits).
+      await patchAppConfig({ zapret: { checkUpdates: value } })
       return actual
     }),
     'zapret:runTests': h(() => runZapretTests()),

@@ -28,7 +28,7 @@ import path from 'node:path'
 import { zapretBundleDir } from '../utils/dirs'
 import { devEnv } from '../utils/dev-env'
 import { fetchGithub } from '../utils/github'
-import { getAppConfig, patchAppConfig } from '../config'
+import { patchAppConfig } from '../config'
 import { isValidCidrEntry, isValidListEntry, normalizeListContent } from './zapret-list-lines'
 
 const DEFAULT_UPSTREAM_BASE =
@@ -414,12 +414,8 @@ export async function setIpSetMode(mode: IpSetMode): Promise<IpSetModeStatus> {
 
   const status = getIpSetModeStatus()
   try {
-    const cfg = await getAppConfig()
-    if (cfg.zapret) {
-      await patchAppConfig({
-        zapret: { ...(cfg.zapret as ZapretConfig), ipsetMode: status.mode }
-      })
-    }
+    // Leaf-only patch: `ipsetMode` is the only field this operation owns.
+    await patchAppConfig({ zapret: { ipsetMode: status.mode } })
   } catch {
     /* best-effort — the file state is authoritative for Zapret */
   }

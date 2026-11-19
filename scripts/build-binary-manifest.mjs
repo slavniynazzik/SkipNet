@@ -19,6 +19,10 @@ export const MANIFEST_NAME = 'binaries.sha256'
 
 const EXECUTABLE_EXTENSIONS = new Set([
   '.bat',
+  // WinDivert filter payloads (`tls_clienthello_*`, `quic_initial_*`, `stun*`)
+  // are loaded by winws.exe at runtime and can change its behaviour as much as
+  // the .bat itself, so they are hashed like executable payload.
+  '.bin',
   '.cmd',
   '.com',
   '.cpl',

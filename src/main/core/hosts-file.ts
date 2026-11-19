@@ -131,10 +131,6 @@ export function readHostsText(): string {
   }
 }
 
-export function hostsFileExists(): boolean {
-  return existsSync(windowsHostsPath())
-}
-
 /** Best-effort write-access probe (the real check is the write attempt). */
 export function hostsFileWritable(): boolean {
   const target = windowsHostsPath()

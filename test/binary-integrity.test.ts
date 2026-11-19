@@ -104,6 +104,17 @@ describe('verifyZapretBundle / verifyTgwsBinary', () => {
     expect(() => verifyZapretBundle(path.join(root, 'zapret'))).toThrow(/не описан/)
   })
 
+  it('requires winws .bin payloads to be manifest-covered', () => {
+    write('zapret/bin/tls_clienthello_test.bin', 'fake payload')
+
+    expect(() => verifyZapretBundle(path.join(root, 'zapret'))).toThrow(
+      /tls_clienthello_test\.bin.*не описан/
+    )
+
+    updateManifestEntries(root, collectComponentExecutableFiles(root, path.join(root, 'zapret')))
+    expect(() => verifyZapretBundle(path.join(root, 'zapret'))).not.toThrow()
+  })
+
   it('rejects a missing file listed in the manifest', () => {
     rmSync(path.join(root, 'zapret', 'bin', 'WinDivert.dll'))
 

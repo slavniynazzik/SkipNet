@@ -337,12 +337,14 @@ export async function installTgwsUpdate(
   // Persist version + clear "Later" dismissal.
   const finalVersion = expectedVersion || undefined
   const cfg = await getAppConfig()
-  const next: TgwsConfig = {
-    ...(cfg.tgws as TgwsConfig),
-    installedVersion: finalVersion ?? cfg.tgws?.installedVersion,
-    dismissedUpdateTag: undefined
-  }
-  await patchAppConfig({ tgws: next })
+  // Leaf-only patch: do not spread the pre-install `tgws` section (it would
+  // overwrite a concurrent settings edit with stale values).
+  await patchAppConfig({
+    tgws: {
+      installedVersion: finalVersion ?? cfg.tgws?.installedVersion,
+      dismissedUpdateTag: undefined
+    }
+  })
 
   cache = null
   return { installedVersion: finalVersion, sizeBytes: buf.length }
@@ -350,10 +352,5 @@ export async function installTgwsUpdate(
 
 export async function dismissTgwsUpdate(tag: string): Promise<void> {
   if (!tag) return
-  const cfg = await getAppConfig()
-  const next: TgwsConfig = {
-    ...(cfg.tgws as TgwsConfig),
-    dismissedUpdateTag: tag
-  }
-  await patchAppConfig({ tgws: next })
+  await patchAppConfig({ tgws: { dismissedUpdateTag: tag } })
 }

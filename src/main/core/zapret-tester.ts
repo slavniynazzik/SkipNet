@@ -59,6 +59,13 @@ const PROBE_TIMEOUT_MS = 5000
 const STRATEGY_WARMUP_MS = 4500
 const STRATEGY_BOOT_TIMEOUT_MS = 6000
 const PASS_THRESHOLD = 0.5
+/**
+ * After a Start/Stop pre-empts the sweep, give the new owner this long to
+ * become observable before the next strategy may start. Two winws.exe
+ * instances must never overlap.
+ */
+const PREEMPT_SETTLE_MS = 1000
+const PREEMPT_POLL_MS = 100
 const RESULTS_FILENAME = 'zapret-test-results.json'
 /** Hard ceiling for one sweep, whatever the strategy count. */
 export const STRATEGY_TEST_DEADLINE_MS = 10 * 60_000
@@ -186,6 +193,11 @@ function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
   })
 }
 
+/** Plain timer for the pre-emption settle window (must not short-circuit). */
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
 async function probeOne(url: string, signal?: AbortSignal): Promise<ProbeResult> {
   const t0 = Date.now()
   const ctrl = new AbortController()
@@ -311,7 +323,23 @@ interface StrategyScore {
 }
 
 /**
- * Run one strategy and score it. Returns null when the sweep was cancelled.
+ * A strategy that never produced traffic still occupies a row in the report.
+ * Reserving `null` for cancellation is what keeps one broken strategy from
+ * silently truncating the whole sweep (B3).
+ */
+function zeroScore(): StrategyScore {
+  return {
+    okCount: 0,
+    totalCount: HTTP_TARGETS.length,
+    score: 0,
+    passed: false
+  }
+}
+
+/**
+ * Run one strategy and score it. Returns null only when the sweep was
+ * cancelled; a strategy that fails to spawn or boot scores zero so the caller
+ * can continue with the next one.
  *
  * The operation lock is held only around the clean-up + spawn boundary; the
  * warm-up and probes run outside it so Start/Stop are never blocked for more
@@ -349,15 +377,24 @@ async function testOneStrategy(
     })
     .catch(() => null)
 
-  // If a user Start/Stop pre-empted us while we were queued for the lock, do
-  // not keep waiting: the queued section above re-checks the signal and no-ops.
-  const child = await Promise.race([spawnPromise, aborted(signal)])
-  if (!child || signal.aborted) {
+  // Cancel promptly, but never leak an unowned child: the abort can land after
+  // `spawnStrategy` ran and before the queued lock section resolved. Await the
+  // spawn and kill whatever it produced before returning.
+  await Promise.race([spawnPromise, aborted(signal)])
+  const child = await spawnPromise
+  if (signal.aborted) {
     if (child) await deps.killChildTree(child.pid)
     return null
   }
+  // Spawn failure (missing .bat, cmd.exe refused, lock rejected) = zero score,
+  // not cancellation: the sweep continues with the next strategy.
+  if (!child) return zeroScore()
 
-  let preempted = false
+  // A Start/Stop that pre-empted us owns winws.exe now; only that path waits
+  // for the new instance, a plain cancel must return immediately.
+  const preempted = (): boolean =>
+    signal.aborted && activeRun?.reason === 'preempted'
+
   try {
     const deadline = deps.now() + STRATEGY_BOOT_TIMEOUT_MS
     let booted = false
@@ -370,7 +407,10 @@ async function testOneStrategy(
       if (child.exitCode !== null && child.exitCode !== undefined) break
       await abortableSleep(150, signal)
     }
-    if (!booted || signal.aborted) return null
+    if (signal.aborted) return null
+    // Never booted (exited immediately or stayed invisible) — score it zero
+    // and move on instead of ending the sweep.
+    if (!booted) return zeroScore()
 
     // Extra warmup so winws.exe finishes binding WinDivert filters before we
     // hit it with traffic. Empirically 4-5s is the minimum.
@@ -384,13 +424,24 @@ async function testOneStrategy(
     const score = totalCount === 0 ? 0 : okCount / totalCount
     return { okCount, totalCount, score, passed: score >= PASS_THRESHOLD }
   } finally {
-    preempted = signal.aborted
+    // Always drop our own tree first, even when a Start/Stop pre-empted us.
     await deps.killChildTree(child.pid)
-    // When a Start/Stop pre-empted the sweep, the new owner of winws.exe is
-    // responsible for it — killing by image name here would kill their
-    // process. `taskkill /T` above is enough to drop our own tree.
-    if (!preempted) await deps.killWinws()
-    await abortableSleep(400, signal)
+    if (preempted()) {
+      // Wait until the new owner is observable (or a short bound elapses) so
+      // the next iteration cannot start a second winws.exe on top of it.
+      const bound = deps.now() + PREEMPT_SETTLE_MS
+      while (deps.now() < bound) {
+        try {
+          if (await deps.isWinwsRunning()) break
+        } catch {
+          break
+        }
+        await sleep(PREEMPT_POLL_MS)
+      }
+    } else {
+      await deps.killWinws()
+      await abortableSleep(400, signal)
+    }
   }
 }
 
@@ -486,6 +537,8 @@ export function runStrategyTestsWith(deps: StrategyTesterDeps): Promise<Strategy
           }
           try {
             const r = await testOneStrategy(batPath, signal, deps)
+            // `null` means the sweep was cancelled; a zero-scored strategy is
+            // still an object, so a broken strategy never ends the sweep.
             if (!r) break
             results[s.file] = { tested: true, ...r }
             if (r.passed && r.score > bestScore) {

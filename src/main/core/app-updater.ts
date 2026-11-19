@@ -591,15 +591,3 @@ export async function installAppUpdate(tag: string): Promise<{ scheduled: true }
 
   return { scheduled: true }
 }
-
-// Convenience used by index.ts on startup if autoCheckUpdate is enabled.
-export function silentBackgroundCheck(): void {
-  checkAppUpdate(false).catch(() => void 0)
-}
-
-// Re-export so unrelated modules don't have to depend on the cache
-// internals when they want to hint that a fresh check is appropriate
-// (e.g. after the user explicitly cleared `dismissedAppUpdateTag`).
-export function invalidateAppUpdateCache(): void {
-  cache = null
-}

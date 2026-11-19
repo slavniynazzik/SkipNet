@@ -9,6 +9,7 @@
 import { defaultConfig } from './template'
 import { stringifyYaml } from './yaml'
 import { appLog, initAppLog } from './app-logger'
+import { getAppConfigSync } from '../config'
 import { sweepStaleStagingFiles } from './secure-staging'
 import { mkdir, writeFile, copyFile, rename, unlink } from 'fs/promises'
 import { randomUUID } from 'crypto'
@@ -121,7 +122,13 @@ export async function init(): Promise<void> {
   await initDirs()
   await initConfig()
   // Prune day files beyond `maxLogDays` before the first line is written.
-  await initAppLog()
+  let maxLogDays: number | undefined
+  try {
+    maxLogDays = getAppConfigSync().maxLogDays
+  } catch {
+    /* pruning falls back to the default window */
+  }
+  await initAppLog(maxLogDays)
 
   // Portable builds keep `resources/` next to the exe, which the same user can
   // write to. The embedded manifest still catches tampering at runtime, but it

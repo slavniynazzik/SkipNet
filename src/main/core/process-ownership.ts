@@ -293,7 +293,3 @@ export function listTrackedProcesses(component?: TrackedProcess['component']): T
   const all = [...tracked.values()]
   return component ? all.filter((entry) => entry.component === component) : all
 }
-
-export function clearTrackedProcesses(): void {
-  tracked.clear()
-}

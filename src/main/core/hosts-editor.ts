@@ -441,10 +441,13 @@ async function planReachableState(
   const control = await probeIps(['1.1.1.1', '8.8.8.8'], { cacheOnly, force })
   const controlVerdicts = [...control.values()]
   if (controlVerdicts.length > 0 && !controlVerdicts.some(Boolean)) {
+    // We cannot tell "the pins are dead" from "this machine is offline", so
+    // apply the user's selection as-is and say the filtering was skipped —
+    // never claim that nothing changed.
     return {
       state,
       warnings: [
-        'Не удалось проверить адреса: нет доступа в интернет. Настройки не изменены.'
+        'Фильтрация недоступных адресов пропущена (нет доступа к контрольным адресам)'
       ]
     }
   }
@@ -502,6 +505,8 @@ async function applyCandidate(
     allowLegacy?: boolean
     probe?: ProbeMode
     recovery?: HostsStateRecovery
+    /** Already probed outside the lock; skip `planReachableState` entirely. */
+    preplanned?: { state: HostsState; warnings: string[] }
   } = {}
 ): Promise<ApplyOutcome> {
   const original = readHostsRawStrict()
@@ -518,7 +523,10 @@ async function applyCandidate(
   }
 
   // Health check happens before rendering so dead pins never reach the file.
-  const planned = await planReachableState(catalog, candidate, options.probe ?? 'cache')
+  // A caller that probed outside the lock passes the result in.
+  const planned =
+    options.preplanned ??
+    (await planReachableState(catalog, candidate, options.probe ?? 'cache'))
   const effective = planned.state
   const managed = renderManagedBlock(catalog, effective)
   const adobeBlock = renderAdobeBlock(adobe.hosts)
@@ -877,15 +885,44 @@ export async function importLegacyHostsBlocks(): Promise<HostsOperationResult> {
 }
 
 export async function reapplyHostsState(forceProbe = false): Promise<HostsOperationResult> {
+  if (!forceProbe) {
+    // Plain «Применить»: cached verdicts only, no network, so the short lock
+    // can cover the whole read-modify-write cycle.
+    const { result, changed } = await withStateLock(async () => {
+      const { catalog } = getHostsCatalog()
+      const content = readHostsRawStrict()
+      const { state, recovery } = await loadEffectiveState(catalog, content)
+      const outcome = await applyCandidate(catalog, state, { probe: 'cache', recovery })
+      return {
+        result: operationResult(catalog, outcome, 'Настройки hosts применены'),
+        changed: outcome.changed
+      }
+    })
+    return scheduleDnsFlush(result, changed)
+  }
+
+  // «Проверить адреса» really probes. Snapshot under the lock, release it for
+  // the network work, then re-acquire only to persist/apply — same ordering as
+  // `refreshHostsAddressesWith` (audit P1-4).
+  const snapshot = await withStateLock(async () => {
+    const { catalog } = getHostsCatalog()
+    const content = readHostsRawStrict()
+    const { state, recovery } = await loadEffectiveState(catalog, content)
+    return { catalog, state, recovery, signature: hostsStateSignature(state) }
+  })
+
+  const planned = await planReachableState(snapshot.catalog, snapshot.state, 'fresh')
+
   const { result, changed } = await withStateLock(async () => {
     const { catalog } = getHostsCatalog()
     const content = readHostsRawStrict()
     const { state, recovery } = await loadEffectiveState(catalog, content)
-    // «Проверить адреса» is the one apply path that really probes; a plain
-    // «Применить» reuses cached verdicts instead of blocking on the network.
-    const outcome = await applyCandidate(catalog, state, {
-      probe: forceProbe ? 'fresh' : 'cache',
-      recovery
+    // A toggle made while the probes were running wins over the stale plan.
+    const stale = hostsStateSignature(state) !== snapshot.signature
+    const outcome = await applyCandidate(catalog, stale ? state : planned.state, {
+      probe: stale ? 'cache' : 'off',
+      recovery: recovery ?? snapshot.recovery,
+      ...(stale ? {} : { preplanned: planned })
     })
     return {
       result: operationResult(catalog, outcome, 'Настройки hosts применены'),

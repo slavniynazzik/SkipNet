@@ -192,18 +192,21 @@ export async function installZapretUpdate(
 
   const finalVersion = result.installedVersion ?? expectedVersion ?? undefined
   const cfg = await getAppConfig()
-  const next: ZapretConfig = {
-    ...(cfg.zapret as ZapretConfig),
-    installedVersion: finalVersion ?? cfg.zapret?.installedVersion,
-    dismissedUpdateTag: undefined
-  }
-  await patchAppConfig({ zapret: next })
+  // Leaf-only patch: `installedVersion`/`dismissedUpdateTag` are the only
+  // fields this operation owns; spreading the whole `zapret` section would
+  // overwrite concurrent edits with the pre-install snapshot.
+  await patchAppConfig({
+    zapret: {
+      installedVersion: finalVersion ?? cfg.zapret?.installedVersion,
+      dismissedUpdateTag: undefined
+    }
+  })
 
   if (wasRunning) {
     // The selected strategy may not exist in the new bundle (upstream renames
     // them), in which case starting would only produce an error — leave it
     // stopped and let the user pick a fresh one.
-    const active = next.activeStrategy
+    const active = cfg.zapret?.activeStrategy
     const stillAvailable = !!active && listStrategies().some((s) => s.file === active)
     if (stillAvailable) {
       try {
@@ -223,10 +226,5 @@ export async function installZapretUpdate(
 
 export async function dismissZapretUpdate(tag: string): Promise<void> {
   if (!tag) return
-  const cfg = await getAppConfig()
-  const next: ZapretConfig = {
-    ...(cfg.zapret as ZapretConfig),
-    dismissedUpdateTag: tag
-  }
-  await patchAppConfig({ zapret: next })
+  await patchAppConfig({ zapret: { dismissedUpdateTag: tag } })
 }
