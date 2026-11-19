@@ -1,11 +1,22 @@
 import { existsSync, mkdirSync, writeFileSync, renameSync, unlinkSync } from 'fs'
 import path from 'path'
 import { spawn } from 'child_process'
-import { createHash, randomUUID } from 'crypto'
+import { randomUUID } from 'crypto'
 import { tgwsRuntimeDir } from '../utils/dirs'
 import { getAppConfig, patchAppConfig } from '../config'
+import type { PersistedUpdateCache, UpdateCacheMetadata } from '../utils/update-cache'
 import { loadUpdateCache, saveUpdateCache } from '../utils/update-cache'
-import { fetchGithub } from '../utils/github'
+import {
+  REQUEST_HEADERS,
+  fetchGithubApi,
+  fetchReleaseAsset,
+  fetchReleaseByTag,
+  resolveReleaseDigest,
+  selectReleaseAsset,
+  type GhAsset,
+  type GhRelease
+} from '../utils/github'
+import { assertExpectedReleaseTag, verifyAsset } from './update-integrity'
 import { stopTgws, getTgwsStatus } from './tgws'
 
 // Primary: SkipNet-owned CLI build. Fallback: the known-good headless CLI
@@ -15,21 +26,25 @@ const REPOS = [
   'slavniynazzik/SkipNet-tgws-cli',
   'tenstepsbeforedecay/slipgate-tgws-cli'
 ] as const
-const REQUEST_HEADERS: Record<string, string> = {
-  'User-Agent': 'SkipNet-Updater',
-  Accept: 'application/vnd.github+json'
-}
+
+// Exact-name allow-list for the 64-bit Windows CLI. The release also ships a
+// Win-7 32-bit build we must not install on modern systems.
+const BINARY_ASSET_PATTERNS = [
+  /^TgWsProxy_windows\.exe$/i,
+  /^tgws[\w.+-]*\.exe$/i,
+  /^TgWsProxy_windows(?!.*32bit)[\w.+-]*\.exe$/i
+] as const
+const MIN_BINARY_BYTES = 1024 * 1024
 
 const BUNDLED_TGWS_VERSION = '1.11.4'
 
 export interface TgwsUpdateInfo {
   installed?: string
   latest?: string
+  /** Raw GitHub tag (`v1.11.4` or `1.11.4`); the only thing the renderer sends back. */
+  tag?: string
   hasUpdate: boolean
   assetName?: string
-  assetUrl?: string
-  assetSize?: number
-  assetDigest?: string
   releaseUrl?: string
   publishedAt?: string
   dismissed?: boolean
@@ -60,21 +75,7 @@ function compareVersion(a: string, b: string): number {
   return 0
 }
 
-interface GhAsset {
-  name: string
-  browser_download_url: string
-  size: number
-  digest?: string | null
-}
-interface GhRelease {
-  tag_name?: string
-  name?: string
-  html_url?: string
-  published_at?: string
-  assets?: GhAsset[]
-}
-
-let cache: { at: number; data: TgwsUpdateInfo } | null = null
+let cache: PersistedUpdateCache | null = null
 let cacheHydrated = false
 const CACHE_TTL_MS = 12 * 60 * 60 * 1000
 const CACHE_NAME = 'tgws'
@@ -82,7 +83,7 @@ const CACHE_NAME = 'tgws'
 function hydrateCacheFromDisk(): void {
   if (cacheHydrated) return
   cacheHydrated = true
-  const persisted = loadUpdateCache<TgwsUpdateInfo>(CACHE_NAME)
+  const persisted = loadUpdateCache(CACHE_NAME)
   if (persisted) cache = persisted
 }
 
@@ -106,7 +107,7 @@ async function fetchLatestRelease(): Promise<GhRelease> {
   let lastError: unknown = null
   for (const repo of REPOS) {
     try {
-      const res = await fetchGithub(`https://api.github.com/repos/${repo}/releases/latest`, {
+      const res = await fetchGithubApi(`/repos/${repo}/releases/latest`, {
         headers: REQUEST_HEADERS,
         timeoutMs: 10_000
       })
@@ -129,16 +130,18 @@ export async function checkTgwsUpdate(force = false): Promise<TgwsUpdateInfo> {
   const installed = effectiveInstalled(cfg.tgws?.installedVersion)
   const dismissedTag = cfg.tgws?.dismissedUpdateTag
 
-  if (!force && cache && Date.now() - cache.at < CACHE_TTL_MS && cache.data.latest) {
+  if (!force && cache && Date.now() - cache.at < CACHE_TTL_MS && cache.data.version) {
     // Cache is fresh — return it. If it's older than 1h schedule a silent
     // background refresh so the user gets up-to-date info on the NEXT
     // launch without paying the GitHub latency on this one.
     if (Date.now() - cache.at > 60 * 60 * 1000) backgroundRefresh()
     return {
-      ...cache.data,
       installed,
-      hasUpdate: compareVersion(cache.data.latest, installed) > 0,
-      dismissed: dismissedTag === cache.data.latest
+      latest: cache.data.version,
+      tag: cache.data.tag,
+      hasUpdate: !!cache.data.version && compareVersion(cache.data.version, installed) > 0,
+      publishedAt: cache.data.publishedAt,
+      dismissed: dismissedTag === cache.data.version
     }
   }
 
@@ -146,39 +149,45 @@ export async function checkTgwsUpdate(force = false): Promise<TgwsUpdateInfo> {
   try {
     release = await fetchLatestRelease()
   } catch (e) {
-    throw new Error(`Не удалось проверить обновления TgWsProxy: ${e instanceof Error ? e.message : String(e)}`)
+    throw new Error(
+      `Не удалось проверить обновления TgWsProxy: ${e instanceof Error ? e.message : String(e)}`
+    )
   }
 
-  const latestRaw = release.tag_name ?? release.name ?? ''
-  const latest = latestRaw.replace(/^v/i, '').trim() || undefined
+  const tag = release.tag_name?.trim() || release.name?.trim() || undefined
+  const latest = tag?.replace(/^v/i, '').trim() || undefined
 
-  // Strict 64-bit Windows binary match: the release also ships a Win-7 32-bit
-  // build we don't want to install on modern systems.
   const assets = release.assets ?? []
-  const winAsset =
-    assets.find((a) => /^TgWsProxy_windows\.exe$/i.test(a.name)) ??
-    assets.find((a) => /^TgWsProxy_windows.*\.exe$/i.test(a.name) && !/32bit/i.test(a.name))
+  const winAsset = assets.find(
+    (a) =>
+      /^TgWsProxy_windows\.exe$/i.test(a.name) ||
+      /^tgws[\w.+-]*\.exe$/i.test(a.name) ||
+      /^TgWsProxy_windows(?!.*32bit)[\w.+-]*\.exe$/i.test(a.name)
+  )
 
   const hasUpdate = !!latest && compareVersion(latest, installed) > 0
 
   const info: TgwsUpdateInfo = {
     installed,
     latest,
+    tag,
     hasUpdate,
     assetName: winAsset?.name,
-    assetUrl: winAsset?.browser_download_url,
-    assetSize: winAsset?.size,
-    assetDigest: winAsset?.digest ?? undefined,
     releaseUrl: release.html_url,
     publishedAt: release.published_at,
     dismissed: !!latest && dismissedTag === latest
   }
 
-  cache = { at: Date.now(), data: info }
-  // Persist to disk so the NEXT SkipNet launch can render the update
-  // banner instantly from cache instead of paying the 1–2 s GitHub fetch
-  // for the private CLI mirror repo.
-  saveUpdateCache(CACHE_NAME, info)
+  // Persist display metadata only; the binary URL/digest/size are resolved
+  // from the API again at install time.
+  const metadata: UpdateCacheMetadata = {
+    tag: info.tag,
+    version: info.latest,
+    hasUpdate: info.hasUpdate,
+    publishedAt: info.publishedAt
+  }
+  cache = { at: Date.now(), data: metadata }
+  saveUpdateCache(CACHE_NAME, metadata)
   return info
 }
 
@@ -197,13 +206,83 @@ async function killStaleTgwsBinary(): Promise<void> {
   await new Promise((r) => setTimeout(r, 300))
 }
 
+/**
+ * Resolve the release + binary for a tag by querying `api.github.com` at
+ * install time. The tag may have come from either candidate repository, so
+ * both are tried; the on-disk cache never records which one it was.
+ */
+async function resolveInstallTarget(
+  releaseTag: string
+): Promise<{ release: GhRelease; asset: GhAsset }> {
+  let lastError: unknown = null
+  for (const repo of REPOS) {
+    let release: GhRelease | null
+    try {
+      release = await fetchReleaseByTag(repo, releaseTag)
+    } catch (e) {
+      lastError = e
+      continue
+    }
+    if (!release) continue
+    try {
+      const asset = selectReleaseAsset(
+        release,
+        BINARY_ASSET_PATTERNS,
+        'TgWsProxy_windows.exe'
+      )
+      return { release, asset }
+    } catch (e) {
+      lastError = e
+    }
+  }
+  if (lastError instanceof Error) throw lastError
+  throw new Error(`Релиз ${releaseTag} не найден на GitHub — установка отменена`)
+}
+
+/**
+ * Install the TgWsProxy build the main process last checked.
+ *
+ * The renderer supplies only a tag; repo, asset, size, digest and URL are
+ * resolved from `api.github.com` at install time. No executable is written
+ * without a verified sha256.
+ */
 export async function installTgwsUpdate(
-  assetUrl: string,
-  expectedVersion?: string,
-  expectedDigest?: string,
-  expectedSize?: number
+  tag: string
 ): Promise<{ installedVersion?: string; sizeBytes: number }> {
-  if (!assetUrl) throw new Error('Пустая ссылка на бинарник')
+  hydrateCacheFromDisk()
+  const releaseTag = assertExpectedReleaseTag(tag, cache?.data.tag)
+
+  const { release, asset } = await resolveInstallTarget(releaseTag)
+  const expectedVersion = releaseTag.replace(/^v/i, '').trim() || undefined
+  const installedNow = effectiveInstalled((await getAppConfig()).tgws?.installedVersion)
+  if (!expectedVersion || compareVersion(expectedVersion, installedNow) <= 0) {
+    throw new Error('Запрошенный релиз не новее установленной версии — установка отменена')
+  }
+  const expectedDigest = await resolveReleaseDigest(release, asset, 'TgWsProxy')
+
+  let buf: Buffer
+  try {
+    const res = await fetchReleaseAsset(asset.browser_download_url, {
+      headers: { 'User-Agent': REQUEST_HEADERS['User-Agent'] },
+      timeoutMs: 300_000
+    })
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const ab = await res.arrayBuffer()
+    buf = Buffer.from(ab)
+  } catch (e) {
+    throw new Error(`Не удалось скачать TgWsProxy: ${e instanceof Error ? e.message : String(e)}`)
+  }
+
+  verifyAsset(buf, {
+    digest: expectedDigest,
+    size: asset.size,
+    minBytes: MIN_BINARY_BYTES,
+    label: 'TgWsProxy'
+  })
+
+  if (!(buf[0] === 0x4d && buf[1] === 0x5a)) {
+    throw new Error('Загруженный файл не является исполняемым файлом Windows (нет заголовка MZ)')
+  }
 
   // Stop the currently-running tgws first so its on-disk .exe isn't write-
   // locked. Mirrors the zapret install flow.
@@ -215,40 +294,6 @@ export async function installTgwsUpdate(
   // (manual user launch, prior crash) — wipe everything matching the image
   // name before writing.
   await killStaleTgwsBinary()
-
-  let buf: Buffer
-  try {
-    const res = await fetchGithub(assetUrl, {
-      headers: { 'User-Agent': REQUEST_HEADERS['User-Agent'] },
-      timeoutMs: 300_000
-    })
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    const ab = await res.arrayBuffer()
-    buf = Buffer.from(ab)
-  } catch (e) {
-    throw new Error(`Не удалось скачать TgWsProxy: ${e instanceof Error ? e.message : String(e)}`)
-  }
-
-  if (buf.length < 1024 * 1024) {
-    // Smallest legitimate Win build is ~14 MB; anything below 1 MB is a
-    // 404 page or a redirect we failed to follow.
-    throw new Error(`Загруженный файл слишком маленький (${buf.length} байт)`)
-  }
-  if (!(buf[0] === 0x4d && buf[1] === 0x5a)) {
-    throw new Error('Загруженный файл не является исполняемым файлом Windows (нет заголовка MZ)')
-  }
-  if (expectedSize && expectedSize > 0 && buf.length !== expectedSize) {
-    throw new Error(
-      `Размер TgWsProxy не совпадает: получено ${buf.length} байт, ожидалось ${expectedSize}`
-    )
-  }
-  const digestMatch = /^sha256:([0-9a-f]{64})$/i.exec(expectedDigest?.trim() ?? '')
-  if (digestMatch) {
-    const actual = createHash('sha256').update(buf).digest('hex')
-    if (actual !== digestMatch[1].toLowerCase()) {
-      throw new Error('Контрольная сумма TgWsProxy не совпадает — загрузка отклонена')
-    }
-  }
 
   const dir = tgwsRuntimeDir()
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
@@ -292,5 +337,4 @@ export async function dismissTgwsUpdate(tag: string): Promise<void> {
     dismissedUpdateTag: tag
   }
   await patchAppConfig({ tgws: next })
-  if (cache) cache.data.dismissed = cache.data.latest === tag
 }

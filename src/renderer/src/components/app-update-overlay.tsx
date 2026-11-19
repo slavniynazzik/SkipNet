@@ -67,19 +67,19 @@ export default function AppUpdateOverlay(): React.ReactElement | null {
   const visible =
     !!info &&
     info.hasUpdate &&
-    !!info.assetUrl &&
+    !!info.tag &&
     !info.dismissed &&
     !closing
 
   const handleInstall = async (): Promise<void> => {
     // Two clicks in the same tick would both see `installing === false` and
     // start two ~100 MB downloads / two installers.
-    if (!info?.assetUrl || installingRef.current) return
+    if (!info?.tag || installingRef.current) return
     installingRef.current = true
     setInstalling(true)
     setError(null)
     try {
-      await appInstallUpdate(info.assetUrl, info.latest, info.assetDigest, info.assetSize)
+      await appInstallUpdate(info.tag)
       // Main process will quit SkipNet within ~1 s. We just keep the
       // spinner up; user perceives "downloading… closing…".
     } catch (e) {

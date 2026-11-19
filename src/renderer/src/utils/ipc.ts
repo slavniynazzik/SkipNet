@@ -38,11 +38,9 @@ export const tgwsGetLink = (): Promise<string> => invoke('tgws:getLink')
 export interface TgwsUpdateInfo {
   installed?: string
   latest?: string
+  tag?: string
   hasUpdate: boolean
   assetName?: string
-  assetUrl?: string
-  assetSize?: number
-  assetDigest?: string
   releaseUrl?: string
   publishedAt?: string
   dismissed?: boolean
@@ -50,12 +48,9 @@ export interface TgwsUpdateInfo {
 export const tgwsCheckUpdate = (force = false): Promise<TgwsUpdateInfo> =>
   invoke('tgws:checkUpdate', force)
 export const tgwsInstallUpdate = (
-  url: string,
-  expectedVersion?: string,
-  expectedDigest?: string,
-  expectedSize?: number
+  tag: string
 ): Promise<{ installedVersion?: string; sizeBytes: number }> =>
-  invoke('tgws:installUpdate', url, expectedVersion, expectedDigest, expectedSize)
+  invoke('tgws:installUpdate', tag)
 export const tgwsDismissUpdate = (tag: string): Promise<void> =>
   invoke('tgws:dismissUpdate', tag)
 
@@ -66,17 +61,13 @@ export const zapretListStrategies = (): Promise<{ file: string; title: string; d
 export const zapretStart = (): Promise<void> => invoke('zapret:start')
 export const zapretStop = (): Promise<void> => invoke('zapret:stop')
 export const zapretRestart = (): Promise<void> => invoke('zapret:restart')
-export const zapretInstallBundle = (bytes: Uint8Array): Promise<{ strategies: number }> =>
-  invoke('zapret:installBundle', bytes)
 
 export interface ZapretUpdateInfo {
   installed?: string
   latest?: string
+  tag?: string
   hasUpdate: boolean
   assetName?: string
-  assetUrl?: string
-  assetSize?: number
-  assetDigest?: string
   releaseUrl?: string
   publishedAt?: string
   dismissed?: boolean
@@ -84,12 +75,9 @@ export interface ZapretUpdateInfo {
 export const zapretCheckUpdate = (force = false): Promise<ZapretUpdateInfo> =>
   invoke('zapret:checkUpdate', force)
 export const zapretInstallUpdate = (
-  url: string,
-  expectedVersion?: string,
-  expectedDigest?: string,
-  expectedSize?: number
+  tag: string
 ): Promise<{ strategies: number; installedVersion?: string }> =>
-  invoke('zapret:installUpdate', url, expectedVersion, expectedDigest, expectedSize)
+  invoke('zapret:installUpdate', tag)
 export const zapretDismissUpdate = (tag: string): Promise<void> =>
   invoke('zapret:dismissUpdate', tag)
 
@@ -316,10 +304,6 @@ export interface AppUpdateInfo {
   latest?: string
   hasUpdate: boolean
   tag?: string
-  assetName?: string
-  assetUrl?: string
-  assetSize?: number
-  assetDigest?: string
   releaseUrl?: string
   releaseNotes?: string
   publishedAt?: string
@@ -327,13 +311,8 @@ export interface AppUpdateInfo {
 }
 export const appCheckUpdate = (force = false): Promise<AppUpdateInfo> =>
   invoke('app:checkUpdate', force)
-export const appInstallUpdate = (
-  url: string,
-  expectedVersion?: string,
-  expectedDigest?: string,
-  expectedSize?: number
-): Promise<{ scheduled: true }> =>
-  invoke('app:installUpdate', url, expectedVersion, expectedDigest, expectedSize)
+export const appInstallUpdate = (tag: string): Promise<{ scheduled: true }> =>
+  invoke('app:installUpdate', tag)
 export const appDismissUpdate = (tag: string): Promise<void> =>
   invoke('app:dismissUpdate', tag)
 

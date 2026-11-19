@@ -13,8 +13,7 @@ import {
   startZapret,
   stopZapret,
   restartZapret,
-  listStrategies,
-  installZapretBundle
+  listStrategies
 } from '../core/zapret'
 import {
   checkZapretUpdate,
@@ -275,14 +274,7 @@ export function registerIpcMainHandlers(): void {
   ipcMain.handle('tgws:restart', h(() => restartTgws()))
   ipcMain.handle('tgws:getLink', h(() => getTgwsLink()))
   ipcMain.handle('tgws:checkUpdate', h((force) => checkTgwsUpdate(Boolean(force))))
-  ipcMain.handle('tgws:installUpdate', h((url, expectedVersion, expectedDigest, expectedSize) =>
-    installTgwsUpdate(
-      url as string,
-      expectedVersion as string | undefined,
-      expectedDigest as string | undefined,
-      typeof expectedSize === 'number' ? expectedSize : undefined
-    )
-  ))
+  ipcMain.handle('tgws:installUpdate', h((tag) => installTgwsUpdate(String(tag ?? ''))))
   ipcMain.handle('tgws:dismissUpdate', h((tag) => dismissTgwsUpdate(tag as string)))
 
   // ---- Zapret -------------------------------------------------------------
@@ -291,18 +283,8 @@ export function registerIpcMainHandlers(): void {
   ipcMain.handle('zapret:start', h(() => startZapret()))
   ipcMain.handle('zapret:stop', h(() => stopZapret()))
   ipcMain.handle('zapret:restart', h(() => restartZapret()))
-  ipcMain.handle('zapret:installBundle', h((bytes) =>
-    installZapretBundle(bytes as Uint8Array)
-  ))
   ipcMain.handle('zapret:checkUpdate', h((force) => checkZapretUpdate(Boolean(force))))
-  ipcMain.handle('zapret:installUpdate', h((url, expectedVersion, expectedDigest, expectedSize) =>
-    installZapretUpdate(
-      url as string,
-      expectedVersion as string | undefined,
-      expectedDigest as string | undefined,
-      typeof expectedSize === 'number' ? expectedSize : undefined
-    )
-  ))
+  ipcMain.handle('zapret:installUpdate', h((tag) => installZapretUpdate(String(tag ?? ''))))
   ipcMain.handle('zapret:dismissUpdate', h((tag) => dismissZapretUpdate(tag as string)))
 
   // ---- Zapret strategy tester --------------------------------------------
@@ -401,14 +383,7 @@ export function registerIpcMainHandlers(): void {
 
   // ---- SkipNet self-update ----------------------------------------------
   ipcMain.handle('app:checkUpdate', h((force) => checkAppUpdate(Boolean(force))))
-  ipcMain.handle('app:installUpdate', h((url, expectedVersion, expectedDigest, expectedSize) =>
-    installAppUpdate(
-      url as string,
-      expectedVersion as string | undefined,
-      expectedDigest as string | undefined,
-      typeof expectedSize === 'number' ? expectedSize : undefined
-    )
-  ))
+  ipcMain.handle('app:installUpdate', h((tag) => installAppUpdate(String(tag ?? ''))))
   ipcMain.handle('app:dismissUpdate', h((tag) => dismissAppUpdate(tag as string)))
 
   // ---- Quit / restart -----------------------------------------------------

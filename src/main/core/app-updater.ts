@@ -1,35 +1,40 @@
 import { existsSync, mkdirSync, writeFileSync, unlinkSync } from 'fs'
 import { spawn, spawnSync } from 'child_process'
-import { createHash, randomUUID } from 'crypto'
+import { randomUUID } from 'crypto'
 import path from 'path'
 import { app } from 'electron'
 import { dataDir, isPortable } from '../utils/dirs'
 import { getAppConfig, patchAppConfig } from '../config'
+import type { PersistedUpdateCache, UpdateCacheMetadata } from '../utils/update-cache'
 import { loadUpdateCache, saveUpdateCache } from '../utils/update-cache'
-import { fetchGithub } from '../utils/github'
+import { devEnv } from '../utils/dev-env'
+import {
+  REQUEST_HEADERS,
+  fetchGithubApi,
+  fetchReleaseAsset,
+  fetchReleaseByTag,
+  resolveReleaseDigest,
+  selectReleaseAsset,
+  type GhAsset,
+  type GhRelease
+} from '../utils/github'
+import { assertExpectedReleaseTag, verifyAsset } from './update-integrity'
 import { getZapretStatus, startZapret, stopZapret } from './zapret'
 import { stopTgws } from './tgws'
 
 const DEFAULT_REPO = 'slavniynazzik/SkipNet'
+const INSTALLER_ASSET_PATTERNS = [/^SkipNet_x64\.exe$/i] as const
+const MIN_INSTALLER_BYTES = 5 * 1024 * 1024
 
-// Test/seam overrides: a local mock release server can point the updater at
-// its own API/asset URLs without rebuilding. Never set by the app itself.
+// Test/seam override for the repository name only (still api.github.com).
+// Ignored outside development by `devEnv`.
 function updateRepo(): string {
-  const override = process.env.SKIPNET_UPDATE_REPO?.trim()
+  const override = devEnv('SKIPNET_UPDATE_REPO')
   return (override || DEFAULT_REPO).replace(/^\/+|\/+$/g, '')
 }
 
-function releasesLatestUrl(): string {
-  const explicit = process.env.SKIPNET_UPDATE_API_URL?.trim()
-  if (explicit) return explicit
-  const apiBase = (process.env.SKIPNET_UPDATE_API_BASE?.trim() || 'https://api.github.com')
-    .replace(/\/+$/, '')
-  return `${apiBase}/repos/${updateRepo()}/releases/latest`
-}
-
-const REQUEST_HEADERS: Record<string, string> = {
-  'User-Agent': 'SkipNet-Updater',
-  Accept: 'application/vnd.github+json'
+function releasesLatestPath(): string {
+  return `/repos/${updateRepo()}/releases/latest`
 }
 
 export const UPGRADE_MARKER_NAME = '.skipnet-upgrade'
@@ -66,32 +71,10 @@ export interface AppUpdateInfo {
   latest?: string
   hasUpdate: boolean
   tag?: string
-  assetName?: string
-  assetUrl?: string
-  assetSize?: number
-  /** GitHub's `sha256:<hex>` digest of the release asset, when published. */
-  assetDigest?: string
   releaseUrl?: string
   releaseNotes?: string
   publishedAt?: string
   dismissed?: boolean
-}
-
-interface GhAsset {
-  name: string
-  browser_download_url: string
-  size: number
-  digest?: string | null
-}
-interface GhRelease {
-  tag_name?: string
-  name?: string
-  body?: string
-  html_url?: string
-  published_at?: string
-  prerelease?: boolean
-  draft?: boolean
-  assets?: GhAsset[]
 }
 
 function parseVersion(s?: string): string | null {
@@ -127,7 +110,7 @@ function compareVersion(a: string, b: string): number {
   return 0
 }
 
-let cache: { at: number; data: AppUpdateInfo } | null = null
+let cache: PersistedUpdateCache | null = null
 let cacheHydrated = false
 const CACHE_TTL_MS = 6 * 60 * 60 * 1000
 const CACHE_NAME = 'app'
@@ -135,7 +118,7 @@ const CACHE_NAME = 'app'
 function hydrateCacheFromDisk(): void {
   if (cacheHydrated) return
   cacheHydrated = true
-  const persisted = loadUpdateCache<AppUpdateInfo>(CACHE_NAME)
+  const persisted = loadUpdateCache(CACHE_NAME)
   if (persisted) cache = persisted
 }
 
@@ -156,20 +139,29 @@ export async function checkAppUpdate(force = false): Promise<AppUpdateInfo> {
   const cfg = await getAppConfig()
   const dismissedTag = cfg.dismissedAppUpdateTag
 
-  if (!force && cache && Date.now() - cache.at < CACHE_TTL_MS && cache.data.tag) {
+  if (
+    !force &&
+    cache &&
+    Date.now() - cache.at < CACHE_TTL_MS &&
+    cache.data.tag &&
+    cache.data.version
+  ) {
     if (Date.now() - cache.at > 30 * 60 * 1000) backgroundRefresh()
-    const cachedLatest = cache.data.latest
+    const cachedLatest = cache.data.version
     return {
-      ...cache.data,
       installed,
+      latest: cachedLatest,
       hasUpdate: !!cachedLatest && compareVersion(cachedLatest, installed) > 0,
+      tag: cache.data.tag,
+      releaseNotes: cache.data.releaseNotes,
+      publishedAt: cache.data.publishedAt,
       dismissed: dismissedTag === cache.data.tag
     }
   }
 
   let release: GhRelease
   try {
-    const res = await fetchGithub(releasesLatestUrl(), {
+    const res = await fetchGithubApi(releasesLatestPath(), {
       headers: REQUEST_HEADERS,
       timeoutMs: 10_000
     })
@@ -181,50 +173,44 @@ export async function checkAppUpdate(force = false): Promise<AppUpdateInfo> {
     )
   }
 
+  const installedInfo = (latest?: string, tag?: string): AppUpdateInfo => ({
+    installed,
+    latest,
+    hasUpdate: !!latest && compareVersion(latest, installed) > 0,
+    tag,
+    releaseUrl: release.html_url,
+    releaseNotes: release.body?.trim() || undefined,
+    publishedAt: release.published_at,
+    dismissed: !!tag && dismissedTag === tag
+  })
+
   if (release.draft || release.prerelease) {
     const info: AppUpdateInfo = { installed, hasUpdate: false }
-    cache = { at: Date.now(), data: info }
-    saveUpdateCache(CACHE_NAME, info)
+    cache = { at: Date.now(), data: {} }
     return info
   }
 
   const tag = release.tag_name?.trim() || undefined
   const latest = parseVersion(tag) || parseVersion(release.name) || undefined
+  const info = installedInfo(latest, tag)
 
-  // Pick the per-machine NSIS installer artifact. electron-builder.yml writes
-  // it as `SkipNet_x64.exe`; we accept any `SkipNet*.exe` to survive minor
-  // naming changes.
-  const assets = release.assets ?? []
-  const installerAsset =
-    assets.find((a) => /^SkipNet_x64\.exe$/i.test(a.name)) ??
-    assets.find((a) => /^SkipNet.*\.exe$/i.test(a.name) && !/portable/i.test(a.name))
-
-  const hasUpdate = !!latest && compareVersion(latest, installed) > 0
-
-  const info: AppUpdateInfo = {
-    installed,
-    latest,
-    hasUpdate,
-    tag,
-    assetName: installerAsset?.name,
-    assetUrl: installerAsset?.browser_download_url,
-    assetSize: installerAsset?.size,
-    assetDigest: installerAsset?.digest ?? undefined,
-    releaseUrl: release.html_url,
-    releaseNotes: release.body?.trim() || undefined,
-    publishedAt: release.published_at,
-    dismissed: !!tag && dismissedTag === tag
+  // Persist display metadata only. Asset URL/digest/size are resolved from
+  // the API again at install time (see `installAppUpdate`).
+  const metadata: UpdateCacheMetadata = {
+    tag: info.tag,
+    version: info.latest,
+    hasUpdate: info.hasUpdate,
+    publishedAt: info.publishedAt,
+    releaseNotes: info.releaseNotes
   }
-
-  cache = { at: Date.now(), data: info }
-  saveUpdateCache(CACHE_NAME, info)
+  cache = { at: Date.now(), data: metadata }
+  saveUpdateCache(CACHE_NAME, metadata)
   return info
 }
 
 export async function dismissAppUpdate(tag: string): Promise<void> {
   if (!tag) return
   await patchAppConfig({ dismissedAppUpdateTag: tag })
-  if (cache && cache.data.tag === tag) cache.data.dismissed = true
 }
 
 // Path of the upgrade marker, written next to SkipNet.exe so the OLD
@@ -256,39 +242,19 @@ function writeUpgradeMarker(): void {
 }
 
 /**
- * Validate the downloaded installer against the release metadata before it is
- * ever written to disk and executed. Installers historically came through
- * third-party GitHub mirrors, so the bytes must not be trusted blindly.
+ * Install the release the main process last checked.
+ *
+ * The renderer supplies only a tag. Everything that decides *what* runs —
+ * repository, release, asset name, size, digest and download URL — is resolved
+ * from `api.github.com` here, at install time. The persisted update cache is
+ * used for exactly one thing: confirming the tag matches the release that was
+ * last checked and shown to the user.
+ *
+ * The installer is launched in silent mode and SkipNet quits so NSIS can
+ * replace the on-disk files. The installer auto-relaunches the new SkipNet when
+ * it's done; the user perceives the upgrade as ~5–10 s of "closed and reopened".
  */
-function verifyInstaller(buf: Buffer, expectedDigest?: string, expectedSize?: number): void {
-  if (expectedSize && expectedSize > 0 && buf.length !== expectedSize) {
-    throw new Error(
-      `Размер установщика не совпадает: получено ${buf.length} байт, ожидалось ${expectedSize}`
-    )
-  }
-  const digest = expectedDigest?.trim()
-  if (!digest) return
-  const match = /^sha256:([0-9a-f]{64})$/i.exec(digest)
-  if (!match) return
-  const actual = createHash('sha256').update(buf).digest('hex')
-  if (actual !== match[1].toLowerCase()) {
-    throw new Error('Контрольная сумма установщика не совпадает — загрузка отклонена')
-  }
-}
-
-/**
- * Download the installer and launch it in silent mode, then quit SkipNet
- * so NSIS can replace the on-disk files. The installer auto-relaunches the
- * new SkipNet when it's done; the user perceives the upgrade as ~5–10 s
- * of "closed and reopened".
- */
-export async function installAppUpdate(
-  assetUrl: string,
-  expectedVersion?: string,
-  expectedDigest?: string,
-  expectedSize?: number
-): Promise<{ scheduled: true }> {
-  if (!assetUrl) throw new Error('Пустая ссылка на установщик')
+export async function installAppUpdate(tag: string): Promise<{ scheduled: true }> {
   if (process.platform !== 'win32') {
     throw new Error('Авто-обновление поддерживается только на Windows')
   }
@@ -303,9 +269,29 @@ export async function installAppUpdate(
     )
   }
 
+  hydrateCacheFromDisk()
+  const releaseTag = assertExpectedReleaseTag(tag, cache?.data.tag)
+
+  const release = await fetchReleaseByTag(updateRepo(), releaseTag)
+  if (!release) {
+    throw new Error(`Релиз ${releaseTag} не найден на GitHub — установка отменена`)
+  }
+  const asset: GhAsset = selectReleaseAsset(
+    release,
+    INSTALLER_ASSET_PATTERNS,
+    'установщик SkipNet_x64.exe'
+  )
+  const expectedVersion = parseVersion(releaseTag) ?? parseVersion(release.name) ?? undefined
+  if (!expectedVersion || compareVersion(expectedVersion, app.getVersion()) <= 0) {
+    // Defence in depth: a tampered cache could name an older (but genuine)
+    // release. Never downgrade via the updater.
+    throw new Error('Запрошенный релиз не новее установленной версии — установка отменена')
+  }
+  const expectedDigest = await resolveReleaseDigest(release, asset, 'установщика SkipNet')
+
   let buf: Buffer
   try {
-    const res = await fetchGithub(assetUrl, {
+    const res = await fetchReleaseAsset(asset.browser_download_url, {
       headers: { 'User-Agent': REQUEST_HEADERS['User-Agent'] },
       timeoutMs: 600_000
     })
@@ -318,22 +304,20 @@ export async function installAppUpdate(
     )
   }
 
+  // A real SkipNet installer is ~100 MB. The 5 MB floor protects against a
+  // proxy/error page even if the release metadata is somehow wrong. The
+  // bypass is dev-only (`devEnv` returns undefined in packaged builds).
+  const allowSmall = devEnv('SKIPNET_UPDATE_ALLOW_SMALL') === '1'
+  verifyAsset(buf, {
+    digest: expectedDigest,
+    size: asset.size,
+    minBytes: allowSmall ? 0 : MIN_INSTALLER_BYTES,
+    label: 'установщика SkipNet'
+  })
+
   if (!(buf[0] === 0x4d && buf[1] === 0x5a)) {
     throw new Error('Загруженный файл не является исполняемым файлом Windows (нет заголовка MZ)')
   }
-
-  // A real SkipNet installer is ~100 MB. Anything tiny means a proxy or
-  // error page was returned; the MZ check above catches most of those, this
-  // catches truncated downloads. Bypass exists only for local update tests.
-  const minInstallerBytes = 5 * 1024 * 1024
-  if (process.env.SKIPNET_UPDATE_ALLOW_SMALL !== '1' && buf.length < minInstallerBytes) {
-    throw new Error(`Загруженный файл слишком маленький (${buf.length} байт)`)
-  }
-
-  // Verify integrity against the signed release metadata (GitHub computes the
-  // `sha256:` digest server-side). A mirror cannot forge it without also
-  // compromising the API response.
-  verifyInstaller(buf, expectedDigest, expectedSize)
 
   // Write the installer to %TEMP% so it's auto-cleaned by Windows. Using
   // a stable name plus a timestamp keeps concurrent retries (rare) from

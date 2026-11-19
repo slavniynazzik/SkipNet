@@ -113,22 +113,17 @@ const TelegramPage: React.FC = () => {
     tgwsCheckUpdate(false).then(setUpdateInfo).catch(() => setUpdateInfo(null))
   }, [])
 
-  const showBanner = !!updateInfo && updateInfo.hasUpdate && !updateInfo.dismissed && !!updateInfo.assetUrl
+  const showBanner = !!updateInfo && updateInfo.hasUpdate && !updateInfo.dismissed && !!updateInfo.tag
 
   const installUpdate = async (): Promise<void> => {
-    if (installingRef.current || !updateInfo?.assetUrl) return
+    if (installingRef.current || !updateInfo?.tag) return
     installingRef.current = true
     setInstalling(true)
     const tId = toast.loading('Скачиваем TgWsProxy…', {
       description: updateInfo.assetName ?? `v${updateInfo.latest}`
     })
     try {
-      const res = await tgwsInstallUpdate(
-        updateInfo.assetUrl,
-        updateInfo.latest,
-        updateInfo.assetDigest,
-        updateInfo.assetSize
-      )
+      const res = await tgwsInstallUpdate(updateInfo.tag)
       const mb = (res.sizeBytes / (1024 * 1024)).toFixed(1)
       toast.success('TgWsProxy обновлён', {
         id: tId,
@@ -170,7 +165,7 @@ const TelegramPage: React.FC = () => {
     try {
       const fresh = await tgwsCheckUpdate(true)
       setUpdateInfo(fresh.hasUpdate ? { ...fresh, dismissed: false } : fresh)
-      if (fresh.hasUpdate && fresh.assetUrl) {
+      if (fresh.hasUpdate && fresh.tag) {
         toast.info(`Доступно обновление TgWsProxy v${fresh.latest}`, {
           description: 'Нажмите «Обновить» в баннере выше.'
         })

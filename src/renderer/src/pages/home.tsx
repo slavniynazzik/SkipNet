@@ -237,13 +237,13 @@ const Home: React.FC = () => {
     !!zapretUpdate &&
     zapretUpdate.hasUpdate &&
     !zapretUpdate.dismissed &&
-    !!zapretUpdate.assetUrl &&
+    !!zapretUpdate.tag &&
     !zapretSessionDismissed
   const showTgwsBanner =
     !!tgwsUpdate &&
     tgwsUpdate.hasUpdate &&
     !tgwsUpdate.dismissed &&
-    !!tgwsUpdate.assetUrl &&
+    !!tgwsUpdate.tag &&
     !tgwsSessionDismissed
 
   const toggleTgws = async (next: boolean): Promise<void> => {

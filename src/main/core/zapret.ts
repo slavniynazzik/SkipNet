@@ -70,7 +70,7 @@ export function listStrategies(): StrategyDescriptor[] {
   return out.sort((a, b) => a.title.localeCompare(b.title))
 }
 
-export async function installZapretBundle(
+export async function installZapretArchive(
   zipBytes: Uint8Array
 ): Promise<{ strategies: number; installedVersion?: string }> {
   if (!zipBytes || zipBytes.length === 0) {

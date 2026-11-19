@@ -120,22 +120,17 @@ const Zapret: React.FC = () => {
     }
   }, [checkUpdatesEnabled])
 
-  const showBanner = !!updateInfo && updateInfo.hasUpdate && !updateInfo.dismissed && !!updateInfo.assetUrl
+  const showBanner = !!updateInfo && updateInfo.hasUpdate && !updateInfo.dismissed && !!updateInfo.tag
 
   const installUpdate = async (): Promise<void> => {
-    if (installingRef.current || !updateInfo?.assetUrl) return
+    if (installingRef.current || !updateInfo?.tag) return
     installingRef.current = true
     setInstalling(true)
     const tId = toast.loading('Скачиваем сборку Zapret…', {
       description: updateInfo.assetName ?? `v${updateInfo.latest}`
     })
     try {
-      const res = await zapretInstallUpdate(
-        updateInfo.assetUrl,
-        updateInfo.latest,
-        updateInfo.assetDigest,
-        updateInfo.assetSize
-      )
+      const res = await zapretInstallUpdate(updateInfo.tag)
       toast.success('Zapret обновлён', {
         id: tId,
         description: `Версия ${res.installedVersion ?? updateInfo.latest} — стратегий: ${res.strategies}`,
@@ -186,7 +181,7 @@ const Zapret: React.FC = () => {
     try {
       const fresh = await zapretCheckUpdate(true)
       setUpdateInfo(fresh.hasUpdate ? { ...fresh, dismissed: false } : fresh)
-      if (fresh.hasUpdate && fresh.assetUrl) {
+      if (fresh.hasUpdate && fresh.tag) {
         toast.info(`Доступно обновление Zapret v${fresh.latest}`, {
           description: 'Нажмите «Обновить» в баннере выше.'
         })

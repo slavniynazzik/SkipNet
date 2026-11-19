@@ -1,24 +1,32 @@
-import { getZapretStatus, installZapretBundle, listStrategies, startZapret } from './zapret'
+import { installZapretArchive, getZapretStatus, listStrategies, startZapret } from './zapret'
 import { getAppConfig, patchAppConfig } from '../config'
+import type { PersistedUpdateCache, UpdateCacheMetadata } from '../utils/update-cache'
 import { loadUpdateCache, saveUpdateCache } from '../utils/update-cache'
-import { fetchGithub } from '../utils/github'
-import { createHash } from 'crypto'
+import {
+  REQUEST_HEADERS,
+  fetchGithubApi,
+  fetchReleaseAsset,
+  fetchReleaseByTag,
+  resolveReleaseDigest,
+  selectReleaseAsset,
+  type GhRelease
+} from '../utils/github'
+import { assertExpectedReleaseTag, verifyAsset } from './update-integrity'
 
 const REPO = 'Flowseal/zapret-discord-youtube'
-const RELEASES_LATEST_URL = `https://api.github.com/repos/${REPO}/releases/latest`
-const REQUEST_HEADERS: Record<string, string> = {
-  'User-Agent': 'SkipNet-Updater',
-  Accept: 'application/vnd.github+json'
-}
+const RELEASES_LATEST_PATH = `/repos/${REPO}/releases/latest`
+// Exact-name allow-list. Anything else in the release (README, sources,
+// checksums) is never treated as the bundle.
+const ZIP_ASSET_PATTERNS = [/^zapret-discord-youtube[\w.+-]*\.zip$/i, /^zapret[\w.+-]*\.zip$/i] as const
+const MIN_ZIP_BYTES = 1024 * 1024
 
 export interface ZapretUpdateInfo {
   installed?: string
   latest?: string
+  /** Raw GitHub tag (`v1.7.7` or `1.7.7`); the only thing the renderer sends back. */
+  tag?: string
   hasUpdate: boolean
   assetName?: string
-  assetUrl?: string
-  assetSize?: number
-  assetDigest?: string
   releaseUrl?: string
   publishedAt?: string
   // True when the current `latest` tag matches the one the user previously
@@ -55,23 +63,9 @@ function compareVersion(a: string, b: string): number {
   return 0
 }
 
-interface GhAsset {
-  name: string
-  browser_download_url: string
-  size: number
-  digest?: string | null
-}
-interface GhRelease {
-  tag_name?: string
-  name?: string
-  html_url?: string
-  published_at?: string
-  assets?: GhAsset[]
-}
-
 // 12-hour cache, persisted to disk via the update-cache helper so the next
 // launch can render the banner instantly instead of waiting for GitHub.
-let cache: { at: number; data: ZapretUpdateInfo } | null = null
+let cache: PersistedUpdateCache | null = null
 let cacheHydrated = false
 const CACHE_TTL_MS = 12 * 60 * 60 * 1000
 const CACHE_NAME = 'zapret'
@@ -79,7 +73,7 @@ const CACHE_NAME = 'zapret'
 function hydrateCacheFromDisk(): void {
   if (cacheHydrated) return
   cacheHydrated = true
-  const persisted = loadUpdateCache<ZapretUpdateInfo>(CACHE_NAME)
+  const persisted = loadUpdateCache(CACHE_NAME)
   if (persisted) cache = persisted
 }
 
@@ -102,17 +96,19 @@ function effectiveInstalled(cfgInstalled?: string): string {
 
 export async function checkZapretUpdate(force = false): Promise<ZapretUpdateInfo> {
   hydrateCacheFromDisk()
-  if (!force && cache && Date.now() - cache.at < CACHE_TTL_MS) {
+  if (!force && cache && Date.now() - cache.at < CACHE_TTL_MS && cache.data.version) {
     // Re-attach live values that may have changed since the cached call.
     const cfg = await getAppConfig()
     const installedNow = effectiveInstalled(cfg.zapret?.installedVersion)
     if (Date.now() - cache.at > 60 * 60 * 1000) backgroundRefresh()
     return {
-      ...cache.data,
       installed: installedNow,
+      latest: cache.data.version,
+      tag: cache.data.tag,
       hasUpdate:
-        !!cache.data.latest && compareVersion(cache.data.latest, installedNow) > 0,
-      dismissed: cfg.zapret?.dismissedUpdateTag === cache.data.latest
+        !!cache.data.version && compareVersion(cache.data.version, installedNow) > 0,
+      publishedAt: cache.data.publishedAt,
+      dismissed: cfg.zapret?.dismissedUpdateTag === cache.data.version
     }
   }
 
@@ -122,7 +118,7 @@ export async function checkZapretUpdate(force = false): Promise<ZapretUpdateInfo
 
   let release: GhRelease
   try {
-    const res = await fetchGithub(RELEASES_LATEST_URL, {
+    const res = await fetchGithubApi(RELEASES_LATEST_PATH, {
       headers: REQUEST_HEADERS,
       timeoutMs: 10_000
     })
@@ -133,47 +129,69 @@ export async function checkZapretUpdate(force = false): Promise<ZapretUpdateInfo
     throw new Error(`Не удалось проверить обновления: ${e instanceof Error ? e.message : String(e)}`)
   }
 
-  const latestRaw = release.tag_name ?? release.name ?? ''
-  const latest = latestRaw.replace(/^v/i, '').trim() || undefined
+  const tag = release.tag_name?.trim() || release.name?.trim() || undefined
+  const latest = tag?.replace(/^v/i, '').trim() || undefined
 
   const assets = release.assets ?? []
-  // Prefer the canonical "zapret-discord-youtube-*.zip" asset, fall back
-  // to any .zip if the maintainer renamed it.
   const zipAsset =
-    assets.find((a) => /^zapret-discord-youtube.*\.zip$/i.test(a.name)) ??
-    assets.find((a) => /\.zip$/i.test(a.name))
+    assets.find((a) => /^zapret-discord-youtube[\w.+-]*\.zip$/i.test(a.name)) ??
+    assets.find((a) => /^zapret[\w.+-]*\.zip$/i.test(a.name))
 
   const hasUpdate = !!latest && compareVersion(latest, installed) > 0
 
   const info: ZapretUpdateInfo = {
     installed,
     latest,
+    tag,
     hasUpdate,
     assetName: zipAsset?.name,
-    assetUrl: zipAsset?.browser_download_url,
-    assetSize: zipAsset?.size,
-    assetDigest: zipAsset?.digest ?? undefined,
     releaseUrl: release.html_url,
     publishedAt: release.published_at,
     dismissed: !!latest && dismissedTag === latest
   }
 
-  cache = { at: Date.now(), data: info }
-  saveUpdateCache(CACHE_NAME, info)
+  // Persist display metadata only; the archive URL/digest/size are resolved
+  // from the API again at install time.
+  const metadata: UpdateCacheMetadata = {
+    tag: info.tag,
+    version: info.latest,
+    hasUpdate: info.hasUpdate,
+    publishedAt: info.publishedAt
+  }
+  cache = { at: Date.now(), data: metadata }
+  saveUpdateCache(CACHE_NAME, metadata)
   return info
 }
 
+/**
+ * Install the Zapret release the main process last checked.
+ *
+ * The renderer supplies only a tag. Repository, asset name, byte size, digest
+ * and download URL are resolved from `api.github.com` here, at install time;
+ * the on-disk cache cannot change any of them. No archive is extracted without
+ * a verified sha256.
+ */
 export async function installZapretUpdate(
-  assetUrl: string,
-  expectedVersion?: string,
-  expectedDigest?: string,
-  expectedSize?: number
+  tag: string
 ): Promise<{ strategies: number; installedVersion?: string }> {
-  if (!assetUrl) throw new Error('Пустая ссылка на архив')
+  hydrateCacheFromDisk()
+  const releaseTag = assertExpectedReleaseTag(tag, cache?.data.tag)
+
+  const release = await fetchReleaseByTag(REPO, releaseTag)
+  if (!release) {
+    throw new Error(`Релиз ${releaseTag} не найден на GitHub — установка отменена`)
+  }
+  const asset = selectReleaseAsset(release, ZIP_ASSET_PATTERNS, 'архив Zapret')
+  const expectedVersion = releaseTag.replace(/^v/i, '').trim() || undefined
+  const installedNow = effectiveInstalled((await getAppConfig()).zapret?.installedVersion)
+  if (!expectedVersion || compareVersion(expectedVersion, installedNow) <= 0) {
+    throw new Error('Запрошенный релиз не новее установленной версии — установка отменена')
+  }
+  const expectedDigest = await resolveReleaseDigest(release, asset, 'архива Zapret')
 
   let buf: Buffer
   try {
-    const res = await fetchGithub(assetUrl, {
+    const res = await fetchReleaseAsset(asset.browser_download_url, {
       headers: { 'User-Agent': REQUEST_HEADERS['User-Agent'] },
       timeoutMs: 300_000
     })
@@ -184,29 +202,22 @@ export async function installZapretUpdate(
     throw new Error(`Не удалось скачать архив: ${e instanceof Error ? e.message : String(e)}`)
   }
 
-  if (expectedSize && expectedSize > 0 && buf.length !== expectedSize) {
-    throw new Error(
-      `Размер архива не совпадает: получено ${buf.length} байт, ожидалось ${expectedSize}`
-    )
-  }
-  const digestMatch = /^sha256:([0-9a-f]{64})$/i.exec(expectedDigest?.trim() ?? '')
-  if (digestMatch) {
-    const actual = createHash('sha256').update(buf).digest('hex')
-    if (actual !== digestMatch[1].toLowerCase()) {
-      throw new Error('Контрольная сумма архива не совпадает — загрузка отклонена')
-    }
-  }
+  verifyAsset(buf, {
+    digest: expectedDigest,
+    size: asset.size,
+    minBytes: MIN_ZIP_BYTES,
+    label: 'архива Zapret'
+  })
 
-  // `installZapretBundle` must stop winws.exe to replace the files. Remember
+  // `installZapretArchive` must stop winws.exe to replace the files. Remember
   // whether bypassing was active so we can bring it back afterwards instead of
   // silently leaving the user without a working bypass after an update.
   const previous = getZapretStatus().state
   const wasRunning = previous === 'running' || previous === 'starting'
 
-  const result = await installZapretBundle(new Uint8Array(buf))
+  const result = await installZapretArchive(new Uint8Array(buf))
 
-  const finalVersion =
-    result.installedVersion ?? expectedVersion ?? undefined
+  const finalVersion = result.installedVersion ?? expectedVersion ?? undefined
   const cfg = await getAppConfig()
   const next: ZapretConfig = {
     ...(cfg.zapret as ZapretConfig),
@@ -245,5 +256,4 @@ export async function dismissZapretUpdate(tag: string): Promise<void> {
     dismissedUpdateTag: tag
   }
   await patchAppConfig({ zapret: next })
-  if (cache) cache.data.dismissed = cache.data.latest === tag
 }
