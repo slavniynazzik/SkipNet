@@ -1,5 +1,11 @@
 import React, { useEffect, useState } from 'react'
 import { platform } from '@renderer/utils/init'
+import {
+  windowClose,
+  windowIsMaximized,
+  windowMaximize,
+  windowMinimize
+} from '@renderer/utils/ipc'
 
 const WindowControls: React.FC = () => {
   const [isMaximized, setIsMaximized] = useState(false)
@@ -8,13 +14,10 @@ const WindowControls: React.FC = () => {
   const isMac = platform === 'darwin'
 
   useEffect(() => {
-    window.electron.ipcRenderer.invoke('windowIsMaximized').then(setIsMaximized)
+    windowIsMaximized().then(setIsMaximized).catch(() => void 0)
 
-    const onMaximize = (): void => setIsMaximized(true)
-    const onUnmaximize = (): void => setIsMaximized(false)
-
-    window.electron.ipcRenderer.on('window-maximized', onMaximize)
-    window.electron.ipcRenderer.on('window-unmaximized', onUnmaximize)
+    const offMaximize = window.skipnet.on('window-maximized', () => setIsMaximized(true))
+    const offUnmaximize = window.skipnet.on('window-unmaximized', () => setIsMaximized(false))
 
     const onFocus = (): void => setIsFocused(true)
     const onBlur = (): void => setIsFocused(false)
@@ -25,8 +28,8 @@ const WindowControls: React.FC = () => {
     document.addEventListener('pointermove', onAnyPointerMove, { passive: true })
 
     return () => {
-      window.electron.ipcRenderer.removeAllListeners('window-maximized')
-      window.electron.ipcRenderer.removeAllListeners('window-unmaximized')
+      offMaximize()
+      offUnmaximize()
       window.removeEventListener('focus', onFocus)
       window.removeEventListener('blur', onBlur)
       document.removeEventListener('pointermove', onAnyPointerMove)
@@ -36,17 +39,20 @@ const WindowControls: React.FC = () => {
   const handleMinimize = (e: React.MouseEvent<HTMLButtonElement>): void => {
     setSuppressHover('minimize')
     e.currentTarget.blur()
-    window.electron.ipcRenderer.invoke('windowMinimize')
+    windowMinimize().catch(() => void 0)
   }
   const handleMaximize = async (): Promise<void> => {
-    await window.electron.ipcRenderer.invoke('windowMaximize')
-    const maximized = await window.electron.ipcRenderer.invoke('windowIsMaximized')
-    setIsMaximized(Boolean(maximized))
+    try {
+      await windowMaximize()
+      setIsMaximized(Boolean(await windowIsMaximized()))
+    } catch {
+      /* IPC rejected — keep the current visual state */
+    }
   }
   const handleClose = (e: React.MouseEvent<HTMLButtonElement>): void => {
     setSuppressHover('close')
     e.currentTarget.blur()
-    window.electron.ipcRenderer.invoke('windowClose')
+    windowClose().catch(() => void 0)
   }
 
   // Cleared when the cursor actually leaves the button — at that point real

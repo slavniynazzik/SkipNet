@@ -26,19 +26,11 @@ const handleIpcPayload = (log: ControllerLog): void => {
   useLogsStore.setState({ logs: next })
 }
 
-let ipcListener: ((event: unknown, payload: ControllerLog) => void) | null = null
-
-export const attachLogsStore = (): (() => void) => {
-  window.electron.ipcRenderer.removeAllListeners('log')
-  ipcListener = (_event, payload): void => handleIpcPayload(payload)
-  window.electron.ipcRenderer.on('log', ipcListener)
-  return (): void => {
-    if (ipcListener) {
-      window.electron.ipcRenderer.removeListener('log', ipcListener)
-      ipcListener = null
-    }
-  }
-}
+export const attachLogsStore = (): (() => void) =>
+  window.skipnet.on('log', (...args) => {
+    const [payload] = args as [ControllerLog]
+    handleIpcPayload(payload)
+  })
 
 // Helper for the Logs page: human-readable HH:MM:SS.
 export const formatLogTime = (t: number | string): string =>

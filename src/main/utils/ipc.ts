@@ -91,6 +91,8 @@ import {
 import { execFile } from 'node:child_process'
 import { writeFileSync, unlinkSync } from 'node:fs'
 import path from 'node:path'
+import { isTrustedFrameUrl, type TrustedFrameOptions } from './ipc-trust'
+import type { InvokeChannel } from '../../shared/ipc-channels'
 
 //
 function logTgError(stage: string, err: Error | null, stderr?: string): void {
@@ -220,19 +222,45 @@ function openTelegramLink(url: string): Promise<void> {
   return Promise.resolve()
 }
 
+interface IpcFailure {
+  ok: false
+  message: string
+}
+
+type IpcHandler = (
+  event: Electron.IpcMainInvokeEvent,
+  ...args: unknown[]
+) => Promise<unknown> | unknown
+
+const IPC_DENIED: IpcFailure = { ok: false, message: 'IPC rejected: untrusted sender' }
+
+function trustedFrameOptions(): TrustedFrameOptions {
+  return {
+    devUrl: process.env['ELECTRON_RENDERER_URL'],
+    prodIndexPath: path.join(__dirname, '../renderer/index.html')
+  }
+}
+
 /**
- * Only the main app frame may invoke privileged handlers. A remote page that
- * somehow ends up in this BrowserWindow must not be able to write hosts,
- * install updates or start processes.
+ * Only the top-level SkipNet frame may invoke privileged handlers. A remote
+ * page — or a subframe — that somehow ends up in this BrowserWindow must not
+ * be able to write hosts, install updates or start processes.
  */
 function isTrustedSender(event: Electron.IpcMainInvokeEvent): boolean {
   const frame = event.senderFrame
   if (!frame) return false
-  const url = frame.url || ''
-  if (url.startsWith('file://')) return true
-  const devUrl = process.env['ELECTRON_RENDERER_URL']
-  if (devUrl && url.startsWith(devUrl)) return true
-  return /^http:\/\/(?:localhost|127\.0\.0\.1):\d+\//.test(url)
+  // Nested frames (iframes, webviews) never get the IPC surface.
+  if (frame !== event.sender.mainFrame) return false
+  return isTrustedFrameUrl(frame.url, trustedFrameOptions())
+}
+
+/** Serialise success/failure without leaking exceptions across IPC. */
+async function seal<T>(run: () => Promise<T> | T): Promise<{ ok: true; value: T } | IpcFailure> {
+  try {
+    return { ok: true, value: await run() }
+  } catch (e: unknown) {
+    return { ok: false, message: e instanceof Error ? e.message : String(e) }
+  }
 }
 
 /**
@@ -240,179 +268,189 @@ function isTrustedSender(event: Electron.IpcMainInvokeEvent): boolean {
  * back to the caller as `{ ok: false, message }` instead of crashing.
  */
 function h<T>(fn: (...args: unknown[]) => Promise<T> | T) {
-  return async (_event: Electron.IpcMainInvokeEvent, ...args: unknown[]) => {
-    if (!isTrustedSender(_event)) {
-      return { ok: false, message: 'IPC rejected: untrusted sender' }
-    }
-    try {
-      const value = await fn(...args)
-      return { ok: true, value }
-    } catch (e: unknown) {
-      return { ok: false, message: e instanceof Error ? e.message : String(e) }
-    }
+  return async (event: Electron.IpcMainInvokeEvent, ...args: unknown[]) => {
+    if (!isTrustedSender(event)) return IPC_DENIED
+    return seal(() => fn(...args))
   }
 }
 
+/**
+ * Same guard and `{ ok, value }` envelope as `h`, for handlers that need the
+ * calling frame (window controls).
+ */
+function hWindow<T>(fn: (event: Electron.IpcMainInvokeEvent) => Promise<T> | T) {
+  return async (event: Electron.IpcMainInvokeEvent) => {
+    if (!isTrustedSender(event)) return IPC_DENIED
+    return seal(() => fn(event))
+  }
+}
+
+/**
+ * Every privileged operation, keyed by the channel the preload allow-list
+ * exports. Typing the map as `Record<InvokeChannel, IpcHandler>` makes a
+ * mismatch between `src/shared/ipc-channels.ts` and this file a typecheck
+ * error in both directions: a missing channel and a channel the preload
+ * cannot reach are both rejected by the compiler.
+ */
 export function registerIpcMainHandlers(): void {
-  // ---- App config ---------------------------------------------------------
-  ipcMain.handle('app:getConfig', h(() => getAppConfig()))
-  ipcMain.handle('app:patchConfig', h((patch) => patchAppConfig(patch as Partial<AppConfig>)))
-  ipcMain.handle('app:version', h(() => app.getVersion()))
+  const handlers: Record<InvokeChannel, IpcHandler> = {
+    // ---- App config -------------------------------------------------------
+    'app:getConfig': h(() => getAppConfig()),
+    'app:patchConfig': h((patch) => patchAppConfig(patch as Partial<AppConfig>)),
+    'app:version': h(() => app.getVersion()),
 
-  // ---- Theme --------------------------------------------------------------
-  ipcMain.handle('theme:setNative', h((theme) => setNativeTheme(theme as AppTheme)))
-  ipcMain.handle('theme:apply', h((file) => applyTheme(file as string)))
+    // ---- Theme ------------------------------------------------------------
+    'theme:setNative': h((theme) => setNativeTheme(theme as AppTheme)),
+    'theme:apply': h((file) => applyTheme(file as string)),
 
-  // ---- Utility ------------------------------------------------------------
-  ipcMain.handle('shell:openTelegramLink', h((url) => openTelegramLink(url as string)))
-  ipcMain.handle('clipboard:writeText', h((text) => { clipboard.writeText(text as string) }))
+    // ---- Utility ----------------------------------------------------------
+    'shell:openTelegramLink': h((url) => openTelegramLink(url as string)),
+    'clipboard:writeText': h((text) => { clipboard.writeText(text as string) }),
 
-  // ---- TG WS Proxy --------------------------------------------------------
-  ipcMain.handle('tgws:status', h(() => getTgwsStatus()))
-  ipcMain.handle('tgws:start', h(() => startTgws()))
-  ipcMain.handle('tgws:stop', h(() => stopTgws()))
-  ipcMain.handle('tgws:restart', h(() => restartTgws()))
-  ipcMain.handle('tgws:getLink', h(() => getTgwsLink()))
-  ipcMain.handle('tgws:checkUpdate', h((force) => checkTgwsUpdate(Boolean(force))))
-  ipcMain.handle('tgws:installUpdate', h((tag) => installTgwsUpdate(String(tag ?? ''))))
-  ipcMain.handle('tgws:dismissUpdate', h((tag) => dismissTgwsUpdate(tag as string)))
+    // ---- TG WS Proxy ------------------------------------------------------
+    'tgws:getStatus': h(() => getTgwsStatus()),
+    'tgws:start': h(() => startTgws()),
+    'tgws:stop': h(() => stopTgws()),
+    'tgws:restart': h(() => restartTgws()),
+    'tgws:getLink': h(() => getTgwsLink()),
+    'tgws:checkUpdate': h((force) => checkTgwsUpdate(Boolean(force))),
+    'tgws:installUpdate': h((tag) => installTgwsUpdate(String(tag ?? ''))),
+    'tgws:dismissUpdate': h((tag) => dismissTgwsUpdate(tag as string)),
 
-  // ---- Zapret -------------------------------------------------------------
-  ipcMain.handle('zapret:status', h(() => getZapretStatus()))
-  ipcMain.handle('zapret:listStrategies', h(() => listStrategies()))
-  ipcMain.handle('zapret:start', h(() => startZapret()))
-  ipcMain.handle('zapret:stop', h(() => stopZapret()))
-  ipcMain.handle('zapret:restart', h(() => restartZapret()))
-  ipcMain.handle('zapret:checkUpdate', h((force) => checkZapretUpdate(Boolean(force))))
-  ipcMain.handle('zapret:installUpdate', h((tag) => installZapretUpdate(String(tag ?? ''))))
-  ipcMain.handle('zapret:dismissUpdate', h((tag) => dismissZapretUpdate(tag as string)))
+    // ---- Zapret -----------------------------------------------------------
+    'zapret:getStatus': h(() => getZapretStatus()),
+    'zapret:listStrategies': h(() => listStrategies()),
+    'zapret:start': h(() => startZapret()),
+    'zapret:stop': h(() => stopZapret()),
+    'zapret:restart': h(() => restartZapret()),
+    'zapret:checkUpdate': h((force) => checkZapretUpdate(Boolean(force))),
+    'zapret:installUpdate': h((tag) => installZapretUpdate(String(tag ?? ''))),
+    'zapret:dismissUpdate': h((tag) => dismissZapretUpdate(tag as string)),
 
-  // ---- Zapret strategy tester --------------------------------------------
-  ipcMain.handle('zapret:runStrategyTest', h(() => runStrategyTests()))
-  ipcMain.handle('zapret:getStrategyTestResults', h(() => getStrategyTestResults()))
-  ipcMain.handle('zapret:isStrategyTestRunning', h(() => isStrategyTestRunning()))
+    // ---- Zapret strategy tester ------------------------------------------
+    'zapret:runStrategyTest': h(() => runStrategyTests()),
+    'zapret:getStrategyTestResults': h(() => getStrategyTestResults()),
+    'zapret:isStrategyTestRunning': h(() => isStrategyTestRunning()),
 
-  // ---- Zapret IP list (ipset-all.txt) ------------------------------------
-  ipcMain.handle('zapret:getCuratedIpSets', h(() => getCuratedIpSets()))
-  ipcMain.handle('zapret:getIpList', h(() => getIpListSnapshot()))
-  ipcMain.handle('zapret:applyIpListPatch', h((patch) =>
-    applyIpListPatch((patch ?? {}) as IpListPatch)
-  ))
-  ipcMain.handle('zapret:clearIpList', h(() => clearIpList()))
-  ipcMain.handle('zapret:restoreIpListBackup', h(() => restoreIpListBackup()))
+    // ---- Zapret IP list (ipset-all.txt) ----------------------------------
+    'zapret:getCuratedIpSets': h(() => getCuratedIpSets()),
+    'zapret:getIpList': h(() => getIpListSnapshot()),
+    'zapret:applyIpListPatch': h((patch) => applyIpListPatch((patch ?? {}) as IpListPatch)),
+    'zapret:clearIpList': h(() => clearIpList()),
+    'zapret:restoreIpListBackup': h(() => restoreIpListBackup()),
 
-  // ---- Zapret upstream lists (Flowseal repository) -----------------------
-  ipcMain.handle('zapret:getListsStatus', h(() => getZapretListsStatus()))
-  ipcMain.handle('zapret:updateLists', h((scope) => {
-    const value = scope === 'hosts' || scope === 'ip' || scope === 'all' ? scope : 'all'
-    return updateZapretLists(value as ZapretListsScope)
-  }))
+    // ---- Zapret upstream lists (Flowseal repository) ---------------------
+    'zapret:getListsStatus': h(() => getZapretListsStatus()),
+    'zapret:updateLists': h((scope) => {
+      const value = scope === 'hosts' || scope === 'ip' || scope === 'all' ? scope : 'all'
+      return updateZapretLists(value as ZapretListsScope)
+    }),
 
-  // ---- Zapret network filters (game filter + IPSet mode) -----------------
-  ipcMain.handle('zapret:getGameFilter', h(async () => {
-    const cfg = await getAppConfig()
-    return getGameFilterSettings(cfg.zapret)
-  }))
-  ipcMain.handle('zapret:setGameFilter', h((patch) =>
-    setGameFilter((patch ?? {}) as SetGameFilterInput)
-  ))
-  ipcMain.handle('zapret:getIpSetMode', h(() => getIpSetModeStatus()))
-  ipcMain.handle('zapret:setIpSetMode', h((mode) => {
-    const value: IpSetMode =
-      mode === 'none' || mode === 'loaded' || mode === 'any' ? mode : 'loaded'
-    return setIpSetMode(value)
-  }))
+    // ---- Zapret network filters (game filter + IPSet mode) ---------------
+    'zapret:getGameFilter': h(async () => {
+      const cfg = await getAppConfig()
+      return getGameFilterSettings(cfg.zapret)
+    }),
+    'zapret:setGameFilter': h((patch) => setGameFilter((patch ?? {}) as SetGameFilterInput)),
+    'zapret:getIpSetMode': h(() => getIpSetModeStatus()),
+    'zapret:setIpSetMode': h((mode) => {
+      const value: IpSetMode =
+        mode === 'none' || mode === 'loaded' || mode === 'any' ? mode : 'loaded'
+      return setIpSetMode(value)
+    }),
 
-  // ---- Zapret active fakes ------------------------------------------------
-  ipcMain.handle('zapret:getFakes', h(() => getFakesStatus()))
-  ipcMain.handle('zapret:replaceFake', h((kind, name) => {
-    const value: FakeKind = kind === 'game' ? 'game' : 'discord'
-    return replaceActiveFake(value, String(name ?? ''))
-  }))
+    // ---- Zapret active fakes ----------------------------------------------
+    'zapret:getFakes': h(() => getFakesStatus()),
+    'zapret:replaceFake': h((kind, name) => {
+      const value: FakeKind = kind === 'game' ? 'game' : 'discord'
+      return replaceActiveFake(value, String(name ?? ''))
+    }),
 
-  // ---- Hosts editor -------------------------------------------------------
-  ipcMain.handle('hosts:overview', h(() => getHostsOverview()))
-  ipcMain.handle('hosts:setService', h((id, value) =>
-    setHostsServiceSelection(String(id ?? ''), value)
-  ))
-  ipcMain.handle('hosts:setDnsForAll', h((profile) => setHostsDnsForAll(String(profile ?? ''))))
-  ipcMain.handle('hosts:disableAll', h(() => disableAllHostsServices()))
-  ipcMain.handle('hosts:setAdobe', h((enabled) => setHostsAdobeBlock(Boolean(enabled))))
-  ipcMain.handle('hosts:importLegacy', h(() => importLegacyHostsBlocks()))
-  ipcMain.handle('hosts:apply', h((force) => reapplyHostsState(force === true)))
-  ipcMain.handle('hosts:refreshAddresses', h(() => refreshHostsAddresses()))
-  ipcMain.handle('hosts:restoreLatest', h(() => restoreLatestHostsBackup()))
-  ipcMain.handle('hosts:openFile', h(() => openHostsFile()))
-  ipcMain.handle('hosts:flushDns', h(() => flushHostsDns()))
-  ipcMain.handle('hosts:updateCatalog', h(() => refreshHostsCatalog()))
+    // ---- Hosts editor -----------------------------------------------------
+    'hosts:overview': h(() => getHostsOverview()),
+    'hosts:setService': h((id, value) => setHostsServiceSelection(String(id ?? ''), value)),
+    'hosts:setDnsForAll': h((profile) => setHostsDnsForAll(String(profile ?? ''))),
+    'hosts:disableAll': h(() => disableAllHostsServices()),
+    'hosts:setAdobe': h((enabled) => setHostsAdobeBlock(Boolean(enabled))),
+    'hosts:importLegacy': h(() => importLegacyHostsBlocks()),
+    'hosts:apply': h((force) => reapplyHostsState(force === true)),
+    'hosts:refreshAddresses': h(() => refreshHostsAddresses()),
+    'hosts:restoreLatest': h(() => restoreLatestHostsBackup()),
+    'hosts:openFile': h(() => openHostsFile()),
+    'hosts:flushDns': h(() => flushHostsDns()),
+    'hosts:updateCatalog': h(() => refreshHostsCatalog()),
 
-  // ---- Zapret diagnostics / maintenance -----------------------------------
-  ipcMain.handle('zapret:diagnostics', h(() => runZapretDiagnostics()))
-  ipcMain.handle('zapret:diagnosticsFix', h((fix) => {
-    const id = fix as DiagFixId
-    if (id === 'tcpTimestamps') return fixTcpTimestamps()
-    if (id === 'windivert') return fixWindivertConflict()
-    if (id === 'conflictingBypasses') return removeConflictingBypasses()
-    if (id === 'discordCache') {
-      const r = clearDiscordCache()
-      return { ok: r.failed.length === 0, message: r.found ? 'Кэш Discord очищен.' : 'Discord не найден.' }
-    }
-    return { ok: false, message: 'Неизвестное действие.' }
-  }))
-  ipcMain.handle('zapret:getAutoUpdateCheck', h(() => getAutoUpdateCheck()))
-  ipcMain.handle('zapret:setAutoUpdateCheck', h(async (enabled) => {
-    const value = Boolean(enabled)
-    const actual = setAutoUpdateCheck(value)
-    const cfg = await getAppConfig()
-    if (cfg.zapret) {
-      await patchAppConfig({ zapret: { ...(cfg.zapret as ZapretConfig), checkUpdates: value } })
-    }
-    return actual
-  }))
-  ipcMain.handle('zapret:runTests', h(() => runZapretTests()))
-  ipcMain.handle('zapret:clearDiscordCache', h(() => clearDiscordCache()))
+    // ---- Zapret diagnostics / maintenance ---------------------------------
+    'zapret:diagnostics': h(() => runZapretDiagnostics()),
+    'zapret:diagnosticsFix': h((fix) => {
+      const id = fix as DiagFixId
+      if (id === 'tcpTimestamps') return fixTcpTimestamps()
+      if (id === 'windivert') return fixWindivertConflict()
+      if (id === 'conflictingBypasses') return removeConflictingBypasses()
+      if (id === 'discordCache') {
+        const r = clearDiscordCache()
+        return {
+          ok: r.failed.length === 0,
+          message: r.found ? 'Кэш Discord очищен.' : 'Discord не найден.'
+        }
+      }
+      return { ok: false, message: 'Неизвестное действие.' }
+    }),
+    'zapret:getAutoUpdateCheck': h(() => getAutoUpdateCheck()),
+    'zapret:setAutoUpdateCheck': h(async (enabled) => {
+      const value = Boolean(enabled)
+      const actual = setAutoUpdateCheck(value)
+      const cfg = await getAppConfig()
+      if (cfg.zapret) {
+        await patchAppConfig({ zapret: { ...(cfg.zapret as ZapretConfig), checkUpdates: value } })
+      }
+      return actual
+    }),
+    'zapret:runTests': h(() => runZapretTests()),
+    'zapret:clearDiscordCache': h(() => clearDiscordCache()),
 
-  // ---- Wallpaper ----------------------------------------------------------
-  ipcMain.handle('wallpaper:listWorkshop', h(() => listWorkshopWallpapers(true)))
-  ipcMain.handle('wallpaper:pick', h(() => pickWallpaperFile()))
-  ipcMain.handle('wallpaper:resolve', h(async () => {
-    const cfg = await getAppConfig()
-    return resolveWallpaper(cfg.wallpaper)
-  }))
-  ipcMain.handle('wallpaper:openWorkshop', h((id) => openWorkshopItem(String(id ?? ''))))
+    // ---- Wallpaper --------------------------------------------------------
+    'wallpaper:listWorkshop': h(() => listWorkshopWallpapers(true)),
+    'wallpaper:pick': h(() => pickWallpaperFile()),
+    'wallpaper:resolve': h(async () => {
+      const cfg = await getAppConfig()
+      return resolveWallpaper(cfg.wallpaper)
+    }),
+    'wallpaper:openWorkshop': h((id) => openWorkshopItem(String(id ?? ''))),
 
-  // ---- SkipNet self-update ----------------------------------------------
-  ipcMain.handle('app:checkUpdate', h((force) => checkAppUpdate(Boolean(force))))
-  ipcMain.handle('app:installUpdate', h((tag) => installAppUpdate(String(tag ?? ''))))
-  ipcMain.handle('app:dismissUpdate', h((tag) => dismissAppUpdate(tag as string)))
+    // ---- SkipNet self-update ----------------------------------------------
+    'app:checkUpdate': h((force) => checkAppUpdate(Boolean(force))),
+    'app:installUpdate': h((tag) => installAppUpdate(String(tag ?? ''))),
+    'app:dismissUpdate': h((tag) => dismissAppUpdate(tag as string)),
 
-  // ---- Quit / restart -----------------------------------------------------
-  ipcMain.handle('app:quit', h(() => app.quit()))
-  ipcMain.handle('app:relaunch', h(() => {
-    app.relaunch()
-    app.exit(0)
-  }))
+    // ---- Quit / restart ---------------------------------------------------
+    'app:quit': h(() => app.quit()),
+    'app:relaunch': h(() => {
+      app.relaunch()
+      app.exit(0)
+    }),
 
-  // ---- Window controls (called from window-controls.tsx & i18n.ts) -------
-  // These were noisy "No handler registered" errors before; persisting the
-  // language change is a no-op for now (renderer keeps its own localStorage).
-  ipcMain.handle('setLanguage', async (_e, _lang: string) => undefined)
-  ipcMain.handle('windowIsMaximized', (e) => {
-    const win = BrowserWindow.fromWebContents(e.sender)
-    return win?.isMaximized() ?? false
-  })
-  ipcMain.handle('windowMinimize', (e) => {
-    BrowserWindow.fromWebContents(e.sender)?.minimize()
-  })
-  ipcMain.handle('windowMaximize', (e) => {
-    const win = BrowserWindow.fromWebContents(e.sender)
-    if (!win) return
-    if (win.isMaximized()) win.unmaximize()
-    else win.maximize()
-  })
-  ipcMain.handle('windowClose', (e) => {
-    BrowserWindow.fromWebContents(e.sender)?.close()
-  })
+    // ---- Window controls (window-controls.tsx) ----------------------------
+    'windowIsMaximized': hWindow(
+      (event) => BrowserWindow.fromWebContents(event.sender)?.isMaximized() ?? false
+    ),
+    'windowMinimize': hWindow((event) => {
+      BrowserWindow.fromWebContents(event.sender)?.minimize()
+    }),
+    'windowMaximize': hWindow((event) => {
+      const win = BrowserWindow.fromWebContents(event.sender)
+      if (!win) return
+      if (win.isMaximized()) win.unmaximize()
+      else win.maximize()
+    }),
+    'windowClose': hWindow((event) => {
+      BrowserWindow.fromWebContents(event.sender)?.close()
+    })
+  }
+
+  for (const channel of Object.keys(handlers) as InvokeChannel[]) {
+    ipcMain.handle(channel, handlers[channel])
+  }
 }
 
 /** Legacy export kept so old call-sites compile during transition. */

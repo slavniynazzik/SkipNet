@@ -1,9 +1,10 @@
 ﻿import { electronApp, is, optimizer } from '@electron-toolkit/utils'
-import { app, BrowserWindow, dialog, Menu, shell } from 'electron'
+import { app, BrowserWindow, dialog, Menu, session, shell } from 'electron'
 import windowStateKeeper from 'electron-window-state'
 import { join } from 'path'
 import icon from '../../resources/icon.png?asset'
 import { registerIpcMainHandlers } from './utils/ipc'
+import { isTrustedFrameUrl, type TrustedFrameOptions } from './utils/ipc-trust'
 import { init } from './utils/init'
 import { getAppConfig, getAppConfigSync } from './config'
 import { createTray, isTrayActive, refreshTray } from './resolve/tray'
@@ -39,6 +40,51 @@ export function showError(title: string, message: string): void {
   }
 }
 
+/**
+ * The only two places the renderer is allowed to live: the exact origin of the
+ * electron-vite dev server, or the exact `file://` URL of our built
+ * `out/renderer/index.html`. See `utils/ipc-trust.ts`.
+ */
+function trustedFrameOptions(): TrustedFrameOptions {
+  return {
+    devUrl: process.env['ELECTRON_RENDERER_URL'],
+    prodIndexPath: join(__dirname, '../renderer/index.html')
+  }
+}
+
+function guardNavigation(event: Electron.Event, url: string): void {
+  if (!isTrustedFrameUrl(url, trustedFrameOptions())) event.preventDefault()
+}
+
+const denyWindowOpen: Parameters<Electron.WebContents['setWindowOpenHandler']>[0] = (details) => {
+  try {
+    const target = new URL(details.url)
+    if (target.protocol === 'https:' || target.protocol === 'http:') {
+      shell.openExternal(details.url)
+    }
+  } catch {
+    /* invalid URL — deny silently */
+  }
+  return { action: 'deny' }
+}
+
+/**
+ * Defence in depth for every webContents the app ever creates, including ones
+ * we did not construct ourselves: no `<webview>`, no cross-origin navigation,
+ * no popups. The per-window guards in `createWindow` stay as well so a single
+ * missing listener cannot silently reopen the hole.
+ */
+function applyWebContentsGuards(contents: Electron.WebContents): void {
+  contents.on('will-attach-webview', (event) => event.preventDefault())
+  contents.setWindowOpenHandler(denyWindowOpen)
+  contents.on('will-navigate', (event, url) => guardNavigation(event, url))
+  contents.on('will-redirect', (event, url) => guardNavigation(event, url))
+}
+
+app.on('web-contents-created', (_event, contents) => {
+  applyWebContentsGuards(contents)
+})
+
 /* Single-instance lock */
 if (!app.requestSingleInstanceLock()) {
   app.quit()
@@ -62,6 +108,15 @@ const initPromise = init()
 
 app.whenReady().then(async () => {
   electronApp.setAppUserModelId('com.skipnet.app')
+
+  // The renderer needs no native permissions (camera, microphone, geolocation,
+  // notifications, clipboard-read, ...). Deny every request and every
+  // synchronous permission check.
+  session.defaultSession.setPermissionRequestHandler((_wc, _permission, callback) =>
+    callback(false)
+  )
+  session.defaultSession.setPermissionCheckHandler(() => false)
+
   appLog('info', `SkipNet запущен (v${app.getVersion()}, ${process.platform}-${process.arch})`)
 
   if (process.platform === 'win32' && !is.dev && !(await isRunningAsAdmin())) {
@@ -273,7 +328,13 @@ export async function createWindow(appConfig?: AppConfig): Promise<void> {
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       spellcheck: false,
-      sandbox: false
+      // Renderer is untrusted by design: no Node, no shared JS context with
+      // the preload, Chromium sandbox on, web security on. The narrow bridge
+      // in `src/preload/index.ts` is the only privileged surface.
+      sandbox: true,
+      contextIsolation: true,
+      nodeIntegration: false,
+      webSecurity: true
     }
   })
   mainWindowState.manage(mainWindow)
@@ -343,34 +404,16 @@ export async function createWindow(appConfig?: AppConfig): Promise<void> {
     }
   })
 
-  mainWindow.webContents.setWindowOpenHandler((details) => {
-    try {
-      const target = new URL(details.url)
-      if (target.protocol === 'https:' || target.protocol === 'http:') {
-        shell.openExternal(details.url)
-      }
-    } catch {
-      /* invalid URL — deny silently */
-    }
-    return { action: 'deny' }
-  })
+  // Any click that wants a new window is denied; plain http(s) links are sent
+  // to the user's browser instead.
+  mainWindow.webContents.setWindowOpenHandler(denyWindowOpen)
 
   // The renderer only ever needs the local app page. A navigation to a remote
-  // origin would keep the preload and its IPC access, so block cross-origin
-  // navigation (hash changes and reloads of the same page stay allowed).
-  const preventCrossOriginNavigation = (event: Electron.Event, url: string): void => {
-    try {
-      const current = new URL(mainWindow?.webContents.getURL() || '')
-      const next = new URL(url)
-      if (next.origin !== current.origin) event.preventDefault()
-    } catch {
-      event.preventDefault()
-    }
-  }
-  mainWindow.webContents.on('will-navigate', preventCrossOriginNavigation)
-  mainWindow.webContents.on('will-redirect', (event, url) => {
-    preventCrossOriginNavigation(event as Electron.Event, url)
-  })
+  // origin would keep the preload and its IPC access, so only the exact
+  // renderer URL (dev origin or our own index.html) may be loaded. Hash
+  // changes stay in-page and reloads resolve to the same URL.
+  mainWindow.webContents.on('will-navigate', (event, url) => guardNavigation(event, url))
+  mainWindow.webContents.on('will-redirect', (event, url) => guardNavigation(event, url))
 
   if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
     mainWindow.loadURL(process.env['ELECTRON_RENDERER_URL'])

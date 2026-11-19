@@ -11,18 +11,13 @@ export const useTgwsStore = create<TgwsStore>((set) => ({
   setStatus: (status): void => set({ status })
 }))
 
-let listener: ((event: unknown, payload: CoreStatus) => void) | null = null
-
 export const attachTgwsStore = (): (() => void) => {
-  // Hard-reset to dodge HMR/StrictMode duplicate listeners.
-  window.electron.ipcRenderer.removeAllListeners('tgws:status')
-  listener = (_e, payload) => useTgwsStore.getState().setStatus(payload)
-  window.electron.ipcRenderer.on('tgws:status', listener)
+  // The unsubscribe returned here removes only this registration, so a
+  // StrictMode/HMR re-attach never leaves duplicate listeners behind.
+  const off = window.skipnet.on('tgws:status', (...args) => {
+    const [payload] = args as [CoreStatus]
+    useTgwsStore.getState().setStatus(payload)
+  })
   tgwsStatus().then((s) => useTgwsStore.getState().setStatus(s)).catch(() => void 0)
-  return () => {
-    if (listener) {
-      window.electron.ipcRenderer.removeListener('tgws:status', listener)
-      listener = null
-    }
-  }
+  return off
 }

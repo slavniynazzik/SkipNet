@@ -59,7 +59,4 @@ i18n
     }
   })
 
-// Sync language to main process (tray, macOS menu bar)
-window.electron.ipcRenderer.invoke('setLanguage', savedLanguage)
-
 export default i18n

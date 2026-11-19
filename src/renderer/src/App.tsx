@@ -69,13 +69,11 @@ const App: React.FC = () => {
   }, [customTheme])
 
   useEffect(() => {
-    const handleShowError = (_e: unknown, title: string, message: string): void => {
+    const handleShowError = (...args: unknown[]): void => {
+      const [title, message] = args as [string, string]
       toast.error(title, { description: message })
     }
-    window.electron.ipcRenderer.on('showError', handleShowError)
-    return () => {
-      window.electron.ipcRenderer.removeAllListeners('showError')
-    }
+    return window.skipnet.on('showError', handleShowError)
   }, [])
 
   // Fix the classic Electron "sticky hover/focus" bug.
@@ -96,12 +94,12 @@ const App: React.FC = () => {
     window.addEventListener('blur', clearStuckState)
     window.addEventListener('focus', clearStuckState)
     const handleVisibilityIpc = (): void => clearStuckState()
-    window.electron.ipcRenderer.on('window:visibility', handleVisibilityIpc)
+    const offVisibility = window.skipnet.on('window:visibility', handleVisibilityIpc)
 
     return () => {
       window.removeEventListener('blur', clearStuckState)
       window.removeEventListener('focus', clearStuckState)
-      window.electron.ipcRenderer.removeAllListeners('window:visibility')
+      offVisibility()
       if (resetTimer) clearTimeout(resetTimer)
     }
   }, [])

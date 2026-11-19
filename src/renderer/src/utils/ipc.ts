@@ -5,7 +5,7 @@ interface IpcResult<T> {
 }
 
 async function invoke<T>(channel: string, ...args: unknown[]): Promise<T> {
-  const res = (await window.electron.ipcRenderer.invoke(channel, ...args)) as IpcResult<T>
+  const res = await window.skipnet.invoke<IpcResult<T>>(channel, ...args)
   if (!res || !res.ok) {
     throw new Error(res?.message ?? `IPC ${channel} failed`)
   }
@@ -29,7 +29,7 @@ export const writeClipboard = (text: string): Promise<void> =>
   invoke('clipboard:writeText', text)
 
 // ---- TG WS Proxy ------------------------------------------------------------
-export const tgwsStatus = (): Promise<CoreStatus> => invoke('tgws:status')
+export const tgwsStatus = (): Promise<CoreStatus> => invoke('tgws:getStatus')
 export const tgwsStart = (): Promise<void> => invoke('tgws:start')
 export const tgwsStop = (): Promise<void> => invoke('tgws:stop')
 export const tgwsRestart = (): Promise<void> => invoke('tgws:restart')
@@ -55,7 +55,7 @@ export const tgwsDismissUpdate = (tag: string): Promise<void> =>
   invoke('tgws:dismissUpdate', tag)
 
 // ---- Zapret -----------------------------------------------------------------
-export const zapretStatus = (): Promise<CoreStatus> => invoke('zapret:status')
+export const zapretStatus = (): Promise<CoreStatus> => invoke('zapret:getStatus')
 export const zapretListStrategies = (): Promise<{ file: string; title: string; description: string }[]> =>
   invoke('zapret:listStrategies')
 export const zapretStart = (): Promise<void> => invoke('zapret:start')
@@ -351,6 +351,12 @@ export const wallpaperOpenWorkshop = (id: string): Promise<void> =>
 // ---- App control ------------------------------------------------------------
 export const appQuit = (): Promise<void> => invoke('app:quit')
 export const appRelaunch = (): Promise<void> => invoke('app:relaunch')
+
+// ---- Window controls --------------------------------------------------------
+export const windowIsMaximized = (): Promise<boolean> => invoke('windowIsMaximized')
+export const windowMinimize = (): Promise<void> => invoke('windowMinimize')
+export const windowMaximize = (): Promise<void> => invoke('windowMaximize')
+export const windowClose = (): Promise<void> => invoke('windowClose')
 
 // Deprecated legacy stubs used by components we haven't pruned yet.
 export const needsFirstRunAdmin = async (): Promise<boolean> => false

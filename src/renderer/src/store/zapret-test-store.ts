@@ -22,7 +22,6 @@ export const useZapretTestStore = create<ZapretTestStore>((set) => ({
   set: (patch) => set(patch)
 }))
 
-let listener: ((event: unknown, payload: StrategyTestProgress) => void) | null = null
 let lastToastedRanAt: number | null = null
 // Set as soon as a live progress event arrives. The hydration request below is
 // fired at the same time but resolves later, and must not overwrite fresher
@@ -30,11 +29,10 @@ let lastToastedRanAt: number | null = null
 let progressSeen = false
 
 export const attachZapretTestStore = (): (() => void) => {
-  // Hard reset duplicate listeners under HMR / StrictMode.
-  window.electron.ipcRenderer.removeAllListeners('zapret:testProgress')
   progressSeen = false
 
-  listener = (_e, p) => {
+  const off = window.skipnet.on('zapret:testProgress', (...args) => {
+    const [p] = args as [StrategyTestProgress]
     progressSeen = true
     const isRunning = p.phase === 'starting' || p.phase === 'testing'
     useZapretTestStore.getState().set({
@@ -66,8 +64,7 @@ export const attachZapretTestStore = (): (() => void) => {
         duration: 6000
       })
     }
-  }
-  window.electron.ipcRenderer.on('zapret:testProgress', listener)
+  })
 
   // Hydrate initial state. If a sweep is currently running we mark
   // isRunning=true so the strategies card is locked out immediately
@@ -84,10 +81,5 @@ export const attachZapretTestStore = (): (() => void) => {
     })
   })
 
-  return () => {
-    if (listener) {
-      window.electron.ipcRenderer.removeListener('zapret:testProgress', listener)
-      listener = null
-    }
-  }
+  return off
 }
