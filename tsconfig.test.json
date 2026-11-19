@@ -1,0 +1,18 @@
+{
+  "extends": "./tsconfig.node.json",
+  "include": [
+    "test/**/*.ts",
+    "src/main/**/*.ts",
+    "src/shared/**/*.d.ts",
+    "vitest.config.ts"
+  ],
+  "compilerOptions": {
+    "composite": false,
+    "noEmit": true,
+    "types": ["node", "vitest/globals", "electron-vite/node"],
+    "baseUrl": ".",
+    "paths": {
+      "@main/*": ["./src/main/*"]
+    }
+  }
+}

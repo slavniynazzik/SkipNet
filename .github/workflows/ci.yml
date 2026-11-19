@@ -40,6 +40,12 @@ jobs:
       - name: Lint
         run: pnpm exec eslint . --ext .js,.jsx,.cjs,.mjs,.ts,.tsx,.cts,.mts
 
+      - name: Typecheck tests
+        run: pnpm typecheck:test
+
+      - name: Unit tests
+        run: pnpm test
+
       # A stray NUL byte (e.g. a UTF-16 fragment appended to a UTF-8 file)
       # makes GitHub treat the file as binary and render the whole README as
       # escaped plain text. Fail fast instead of shipping a broken page.

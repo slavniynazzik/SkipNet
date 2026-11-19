@@ -4,6 +4,7 @@ resources/sidecar
 extra
 dist
 out
+coverage
 # Per-version release archive (~190 MB each) — kept locally, published as
 # separate GitHub Releases instead of being committed.
 releases
