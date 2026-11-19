@@ -421,7 +421,7 @@ export async function installAppUpdate(tag: string): Promise<{ scheduled: true }
       const watcherScript = [
         "$ErrorActionPreference = 'SilentlyContinue'",
         `$installerPid = ${installerPid}`,
-        `$exe = '${exePath.replace(/'/g, "''")}'`,
+        `$originalExe = '${exePath.replace(/'/g, "''")}'`,
         `$exeDir = '${exeDir.replace(/'/g, "''")}'`,
         `$logPath = '${logPath.replace(/'/g, "''")}'`,
         'function Log($m) {',
@@ -430,7 +430,7 @@ export async function installAppUpdate(tag: string): Promise<{ scheduled: true }
         'function AppRunning() {',
         '  return [bool](Get-Process -Name SkipNet -ErrorAction SilentlyContinue)',
         '}',
-        'Log "watcher started, installerPid=$installerPid exe=$exe"',
+        'Log "watcher started, installerPid=$installerPid exe=$originalExe"',
         // 1) Wait for the installer to finish (up to 10 min — silent NSIS
         //    upgrades take 5–15s but slow disks / AV may stretch it).
         '$deadline = (Get-Date).AddMinutes(10)',
@@ -443,13 +443,40 @@ export async function installAppUpdate(tag: string): Promise<{ scheduled: true }
         //    (--force-run) time to happen before we interfere.
         'Start-Sleep -Seconds 5',
         'if (AppRunning) { Log "app already running — watcher done"; exit 0 }',
-        // 3) Wait until the new exe actually exists on disk.
-        '$filePoll = (Get-Date).AddSeconds(90)',
-        'while ((Get-Date) -lt $filePoll -and -not (Test-Path -LiteralPath $exe)) {',
-        '  Start-Sleep -Milliseconds 500',
+        // 3) Resolve the new executable. The assisted installer allows the
+        //    user to change the install directory, so the path we were running
+        //    from may no longer exist after the upgrade. Prefer
+        //    `$exeDir\SkipNet.exe`, then the InstallLocation recorded in the
+        //    uninstall registry, and only then the original path (kept as the
+        //    fallback for the common in-place update).
+        '$candidates = New-Object System.Collections.Generic.List[string]',
+        '$candidates.Add((Join-Path $exeDir "SkipNet.exe"))',
+        '$candidates.Add($originalExe)',
+        'foreach ($root in @(',
+        '  "HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall",',
+        '  "HKLM:\\Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall",',
+        '  "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall"',
+        ')) {',
+        '  Get-ChildItem -LiteralPath $root -ErrorAction SilentlyContinue | ForEach-Object {',
+        '    $props = Get-ItemProperty -LiteralPath $_.PSPath -ErrorAction SilentlyContinue',
+        '    if ($props.DisplayName -eq "SkipNet" -and $props.InstallLocation) {',
+        '      $candidates.Add((Join-Path $props.InstallLocation "SkipNet.exe"))',
+        '    }',
+        '  }',
         '}',
-        'if (-not (Test-Path -LiteralPath $exe)) { Log "exe missing at $exe — giving up"; exit 1 }',
-        // 4) Launch, then verify it stayed alive. A process that appears and
+        // 4) Wait until one of the candidates exists on disk.
+        '$filePoll = (Get-Date).AddSeconds(90)',
+        '$exe = $null',
+        'while (-not $exe -and (Get-Date) -lt $filePoll) {',
+        '  foreach ($candidate in $candidates) {',
+        '    if (Test-Path -LiteralPath $candidate) { $exe = $candidate; break }',
+        '  }',
+        '  if (-not $exe) { Start-Sleep -Milliseconds 500 }',
+        '}',
+        'if (-not $exe) { Log "exe missing at $originalExe — giving up"; exit 1 }',
+        '$exeDir = Split-Path -Parent $exe',
+        'if ($exe -ne $originalExe) { Log "install path changed: $originalExe -> $exe" }',
+        // 5) Launch, then verify it stayed alive. A process that appears and
         //    disappears is usually the single-instance lock rejecting a
         //    duplicate while the installer's own copy is starting — retry.
         'for ($i = 1; $i -le 6; $i++) {',

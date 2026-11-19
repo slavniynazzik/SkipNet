@@ -259,6 +259,12 @@ export const hostsUpdateCatalog = (): Promise<HostsCatalogUpdateResult> =>
 // ---- Zapret diagnostics / maintenance --------------------------------------
 export type DiagStatus = 'ok' | 'warn' | 'fail' | 'info'
 export type DiagFixId = 'tcpTimestamps' | 'windivert' | 'conflictingBypasses' | 'discordCache'
+export type DiagActionKind = 'service' | 'process' | 'path' | 'command'
+export interface DiagAction {
+  kind: DiagActionKind
+  target: string
+  details: string
+}
 export interface DiagCheck {
   id: string
   title: string
@@ -270,10 +276,12 @@ export interface DiagCheck {
 export interface DiagnosticsReport {
   generatedAt: number
   checks: DiagCheck[]
+  actions: DiagAction[]
 }
 export interface DiagnosticsFixResult {
   ok: boolean
   message: string
+  actions?: DiagAction[]
 }
 export interface RunTestsResult {
   started: boolean
@@ -281,22 +289,27 @@ export interface RunTestsResult {
   message: string
 }
 export interface DiscordCacheResult {
+  ok: boolean
+  message: string
   closed: string[]
   cleared: string[]
   failed: string[]
   found: boolean
+  actions: DiagAction[]
 }
 export const zapretRunDiagnostics = (): Promise<DiagnosticsReport> =>
   invoke('zapret:diagnostics')
-export const zapretDiagnosticsFix = (fix: DiagFixId): Promise<DiagnosticsFixResult> =>
-  invoke('zapret:diagnosticsFix', fix)
+export const zapretDiagnosticsFix = (
+  fix: DiagFixId,
+  confirmed = false
+): Promise<DiagnosticsFixResult> => invoke('zapret:diagnosticsFix', fix, confirmed)
 export const zapretGetAutoUpdateCheck = (): Promise<boolean> =>
   invoke('zapret:getAutoUpdateCheck')
 export const zapretSetAutoUpdateCheck = (enabled: boolean): Promise<boolean> =>
   invoke('zapret:setAutoUpdateCheck', enabled)
 export const zapretRunTests = (): Promise<RunTestsResult> => invoke('zapret:runTests')
-export const zapretClearDiscordCache = (): Promise<DiscordCacheResult> =>
-  invoke('zapret:clearDiscordCache')
+export const zapretClearDiscordCache = (confirmed = false): Promise<DiscordCacheResult> =>
+  invoke('zapret:clearDiscordCache', confirmed)
 
 // ---- SkipNet self-update ---------------------------------------------------
 export interface AppUpdateInfo {

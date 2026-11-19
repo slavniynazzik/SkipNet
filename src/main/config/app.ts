@@ -13,6 +13,27 @@ import { renameWithRetry } from '../utils/fs-retry'
 let appConfig: AppConfig | undefined
 let writePromise: Promise<void> = Promise.resolve()
 
+/**
+ * Run a config write inside the same serialized queue as `patchAppConfig`.
+ *
+ * `getAppConfig` performs one-shot migrations (dev build-id reset, production
+ * build-id refresh, CONFIG_VERSION migration). Writing those with a bare
+ * `safeWriteConfig` raced a concurrent `patchAppConfig`: the migration could
+ * overwrite the freshly patched file with its pre-patch snapshot (L8).
+ *
+ * The YAML is stringified *inside* the queued task, so it always reflects the
+ * latest in-memory `appConfig` (including a patch that was merged while the
+ * write was waiting for its turn).
+ */
+function queueConfigWrite(): Promise<void> {
+  const previous = writePromise
+  writePromise = previous.catch(() => void 0).then(() => {
+    if (!appConfig) return
+    return safeWriteConfig(stringifyYaml(appConfig))
+  })
+  return writePromise
+}
+
 async function safeWriteConfig(content: string): Promise<void> {
   const configPath = appConfigPath()
   // Random + O_EXCL: a fixed `.tmp` name in userData could be pre-created as a
@@ -129,7 +150,7 @@ export async function getAppConfig(force = false): Promise<AppConfig> {
       }
     }
     try {
-      await safeWriteConfig(stringifyYaml(appConfig))
+      await queueConfigWrite()
     } catch { /* noop — best-effort, will retry on next patch */ }
     // Tear down any auto-launch task / registry entry left over from a
     // prior install so the freshly-reset `autoLaunch: false` actually
@@ -141,7 +162,7 @@ export async function getAppConfig(force = false): Promise<AppConfig> {
   // any user setting (the reset above is deliberately dev-only).
   if (!is.dev && persistedBuildId !== __BUILD_ID__) {
     appConfig = { ...appConfig, lastBuildId: __BUILD_ID__ }
-    try { await safeWriteConfig(stringifyYaml(appConfig)) } catch { /* noop */ }
+    try { await queueConfigWrite() } catch { /* noop */ }
   }
 
   // ---- One-shot migration
@@ -173,9 +194,10 @@ export async function getAppConfig(force = false): Promise<AppConfig> {
       }
     }
     // Persist the migrated config immediately so a crash before the next
-    // patchAppConfig call doesn't roll back the migration.
+    // patchAppConfig call doesn't roll back the migration. Queued, so a
+    // concurrent patch cannot be overwritten by this stale snapshot.
     try {
-      await safeWriteConfig(stringifyYaml(appConfig))
+      await queueConfigWrite()
     } catch { /* noop — migration is best-effort */ }
     // Also tear down any auto-launch task/registry left over from a prior
     // build so SkipNet isn't relaunched on next login against the user's

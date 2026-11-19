@@ -292,18 +292,19 @@ export function registerIpcMainHandlers(): void {
     'hosts:updateCatalog': h(() => refreshHostsCatalog()),
 
     // ---- Zapret diagnostics / maintenance ---------------------------------
+    // Destructive fixes are no-ops unless the renderer passes `confirmed`
+    // after showing the exact action list (C9). The allow-list and the
+    // `{ ok, value }` envelope stay unchanged.
     'zapret:diagnostics': h(() => runZapretDiagnostics()),
-    'zapret:diagnosticsFix': h((fix) => {
+    'zapret:diagnosticsFix': h((fix, confirmed) => {
       const id = fix as DiagFixId
-      if (id === 'tcpTimestamps') return fixTcpTimestamps()
-      if (id === 'windivert') return fixWindivertConflict()
-      if (id === 'conflictingBypasses') return removeConflictingBypasses()
+      const options = { confirmed: confirmed === true }
+      if (id === 'tcpTimestamps') return fixTcpTimestamps(options)
+      if (id === 'windivert') return fixWindivertConflict(options)
+      if (id === 'conflictingBypasses') return removeConflictingBypasses(options)
       if (id === 'discordCache') {
-        const r = clearDiscordCache()
-        return {
-          ok: r.failed.length === 0,
-          message: r.found ? 'Кэш Discord очищен.' : 'Discord не найден.'
-        }
+        const r = clearDiscordCache(options)
+        return { ok: r.ok, message: r.message, actions: r.actions }
       }
       return { ok: false, message: 'Неизвестное действие.' }
     }),
@@ -318,7 +319,9 @@ export function registerIpcMainHandlers(): void {
       return actual
     }),
     'zapret:runTests': h(() => runZapretTests()),
-    'zapret:clearDiscordCache': h(() => clearDiscordCache()),
+    'zapret:clearDiscordCache': h((confirmed) =>
+      clearDiscordCache({ confirmed: confirmed === true })
+    ),
 
     // ---- Wallpaper --------------------------------------------------------
     // Cache is honoured by default; only the explicit «Обновить список»

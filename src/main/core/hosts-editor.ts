@@ -190,32 +190,45 @@ function createBackup(content: string, state: HostsState): void {
   }
 }
 
-function latestBackup(): { content: string; state: HostsState | null } | null {
+interface HostsBackup {
+  file: string
+  content: string
+  state: HostsState | null
+}
+
+/** All readable backups, newest first. Corrupt entries are skipped. */
+function listBackups(): HostsBackup[] {
   const dir = backupsDir()
   try {
-    if (!existsSync(dir)) return null
+    if (!existsSync(dir)) return []
     const hostsFiles = readdirSync(dir)
       .filter((file) => /^hosts-.*\.bak$/.test(file))
       .sort()
       .reverse()
-    if (hostsFiles.length === 0) return null
-    const file = hostsFiles[0]
-    const stamp = file.replace(/^hosts-/, '').replace(/\.bak$/, '')
-    const content = readFileSync(path.join(dir, file)).toString('latin1')
-    let state: HostsState | null = null
-    try {
-      const stateFile = path.join(dir, `state-${stamp}.json`)
-      if (existsSync(stateFile)) {
-        state = JSON.parse(
-          readFileSync(stateFile, 'utf8').replace(/^\uFEFF/, '')
-        ) as HostsState
+    const backups: HostsBackup[] = []
+    for (const file of hostsFiles) {
+      const stamp = file.replace(/^hosts-/, '').replace(/\.bak$/, '')
+      try {
+        const content = readFileSync(path.join(dir, file)).toString('latin1')
+        let state: HostsState | null = null
+        try {
+          const stateFile = path.join(dir, `state-${stamp}.json`)
+          if (existsSync(stateFile)) {
+            state = JSON.parse(
+              readFileSync(stateFile, 'utf8').replace(/^\uFEFF/, '')
+            ) as HostsState
+          }
+        } catch {
+          state = null
+        }
+        backups.push({ file, content, state })
+      } catch {
+        // An unreadable backup must not hide an older, usable one.
       }
-    } catch {
-      state = null
     }
-    return { content, state }
+    return backups
   } catch {
-    return null
+    return []
   }
 }
 
@@ -1128,13 +1141,20 @@ app.on('before-quit', () => {
 export async function restoreLatestHostsBackup(): Promise<HostsOperationResult> {
   const { result } = await withStateLock(async () => {
     const { catalog, source } = getHostsCatalog()
-    const backup = latestBackup()
-    if (!backup) throw new Error('Бэкапов файла hosts ещё нет')
+    const current = readHostsRawStrict()
+    const currentHash = hashHostsContent(current)
+
+    // Skip backups that are byte-identical to the live file: restoring one is
+    // a no-op and made the second press of "Восстановить" look broken (L4).
+    // Pick the newest backup whose content actually differs.
+    const backup = listBackups().find(
+      (candidate) => hashHostsContent(candidate.content) !== currentHash
+    )
+    if (!backup) throw new Error('Нет бэкапа, отличного от текущего файла hosts')
     validateHostsFileContent(backup.content)
 
     // Make the restore itself undoable: keep the file that is about to be
     // replaced as the newest backup.
-    const current = readHostsRawStrict()
     const currentState = loadHostsState(catalog)
     createBackup(current, currentState)
 
@@ -1200,7 +1220,7 @@ export async function restoreLatestHostsBackup(): Promise<HostsOperationResult> 
         catalog,
         source,
         outcome,
-        'Файл hosts восстановлен из последнего бэкапа'
+        `Файл hosts восстановлен из бэкапа ${backup.file}`
       ),
       changed: true
     }

@@ -3,10 +3,16 @@
   <head>
     <meta charset="UTF-8" />
     <title>SkipNet</title>
-    <!-- https://developer.mozilla.org/en-US/docs/Web/HTTP/CSP -->
+    <!--
+      CSP: `file:` is deliberately NOT allowed for images/media. Wallpapers are
+      served through the `skipnet-media://` protocol, which is bound to an
+      allow-list of the active wallpaper and the last Workshop scan. Arbitrary
+      `file:///C:/...` images are therefore blocked by CSP even if a renderer
+      compromise manages to inject one (C11 / audit P1-14).
+    -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' file: data: skipnet-media:; media-src 'self' file: skipnet-media: data: blob:; object-src 'none'; base-uri 'none'; form-action 'none';"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: skipnet-media:; media-src 'self' data: blob: skipnet-media:; object-src 'none'; base-uri 'none'; form-action 'none';"
     />
   </head>
 

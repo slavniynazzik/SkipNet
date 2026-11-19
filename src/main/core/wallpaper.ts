@@ -76,21 +76,43 @@ export interface WallpaperState {
   dim: number
 }
 
-// Paths the custom protocol is allowed to serve. Kept in sync by
-// `resolveWallpaper` and `listWorkshopWallpapers`.
-const allowedMedia = new Set<string>()
+// Paths the custom protocol is allowed to serve. The set is rebuilt instead of
+// growing forever (M5):
+//  - `activeMedia` holds the wallpaper currently selected in the config;
+//  - `scannedMedia` holds the media/preview files of the last Workshop scan.
+// Together they keep the active wallpaper readable while old, no-longer-used
+// Workshop items stop being servable as soon as the next scan replaces them.
+let activeMedia = new Set<string>()
+let scannedMedia = new Set<string>()
 
-/**
- * Whitelist a file for the media protocol. Only real image/video extensions
- * are accepted: without this check a wallpaper path pointing at, say,
- * `config.yaml` would turn `skipnet-media://` into an arbitrary-file read.
- */
-function allow(file: string | undefined): boolean {
-  if (!file) return false
-  const resolved = path.resolve(file)
-  if (!classify(resolved)) return false
-  allowedMedia.add(resolved.toLowerCase())
-  return true
+function mediaKey(file: string): string {
+  return path.resolve(file).toLowerCase()
+}
+
+function rebuildMediaSet(files: Array<string | undefined>): Set<string> {
+  const next = new Set<string>()
+  for (const file of files) {
+    if (!file) continue
+    const resolved = path.resolve(file)
+    if (!classify(resolved)) continue
+    next.add(resolved.toLowerCase())
+  }
+  return next
+}
+
+/** Replace the "current wallpaper" allow-list (only real image/video files). */
+function registerActiveWallpaper(files: Array<string | undefined>): void {
+  activeMedia = rebuildMediaSet(files)
+}
+
+/** Replace the "last Workshop scan" allow-list. */
+function registerScannedMedia(files: Array<string | undefined>): void {
+  scannedMedia = rebuildMediaSet(files)
+}
+
+function isAllowedMedia(file: string): boolean {
+  const key = mediaKey(file)
+  return activeMedia.has(key) || scannedMedia.has(key)
 }
 
 function mediaUrl(file: string): string {
@@ -107,18 +129,25 @@ function clamp(value: unknown, min: number, max: number, fallback: number): numb
   return Math.min(max, Math.max(min, Math.round(n)))
 }
 
+/**
+ * Privileges of the `skipnet-media://` scheme. Exported so the security
+ * invariant is unit-tested: `bypassCSP` must stay `false` (the CSP in
+ * `src/renderer/index.html` explicitly allows the scheme for img/media).
+ */
+export const MEDIA_SCHEME_PRIVILEGES = {
+  standard: true,
+  secure: true,
+  supportFetchAPI: true,
+  stream: true,
+  bypassCSP: false
+} as const
+
 /** Register the privileged scheme. MUST run before Electron is ready. */
 export function registerWallpaperScheme(): void {
   protocol.registerSchemesAsPrivileged([
     {
       scheme: MEDIA_SCHEME,
-      privileges: {
-        standard: true,
-        secure: true,
-        supportFetchAPI: true,
-        stream: true,
-        bypassCSP: true
-      }
+      privileges: MEDIA_SCHEME_PRIVILEGES
     }
   ])
 }
@@ -185,7 +214,7 @@ export function initWallpaperProtocol(): void {
       const token = url.searchParams.get('p')
       if (!token) return new Response('bad request', { status: 400 })
       const file = Buffer.from(token, 'base64url').toString('utf8')
-      if (!file || !allowedMedia.has(path.resolve(file).toLowerCase())) {
+      if (!file || !isAllowedMedia(file)) {
         return new Response('forbidden', { status: 403 })
       }
       if (!existsSync(file)) return new Response('not found', { status: 404 })
@@ -404,8 +433,6 @@ async function scanWorkshopItem(
   const playable = kind !== null
   const mediaPath = playable ? sourcePath! : previewPath
   if (!mediaPath) return null
-  allow(mediaPath)
-  allow(previewPath)
   return {
     id,
     title: (project.title || `Workshop ${id}`).trim() || `Workshop ${id}`,
@@ -444,6 +471,11 @@ export async function listWorkshopWallpapers(force = false): Promise<WorkshopWal
   }
   items.sort((a, b) => a.title.localeCompare(b.title, 'ru'))
   workshopCache = { at: Date.now(), items }
+  // Bound the servable set to this scan: files from removed/renamed Workshop
+  // items stop being readable instead of accumulating for the whole session.
+  registerScannedMedia(
+    items.flatMap((item) => [item.mediaPath, item.previewPath])
+  )
   return items
 }
 
@@ -469,7 +501,10 @@ export async function pickWallpaperFile(): Promise<WallpaperPickResult> {
     : await dialog.showOpenDialog(options)
   if (result.canceled || !result.filePaths[0]) return {}
   const file = result.filePaths[0]
-  if (!allow(file)) return {}
+  // Only validate the extension here. The file becomes servable when
+  // `resolveWallpaper` registers it as the *active* wallpaper after the config
+  // patch, so a picked-but-never-applied path never enters the allow-list.
+  if (!classify(file)) return {}
   return { path: file, name: path.basename(file) }
 }
 
@@ -488,12 +523,16 @@ export async function resolveWallpaper(config?: WallpaperConfig): Promise<Wallpa
   const blur = clamp(config?.blur, 0, 32, 0)
   const dim = clamp(config?.dim, 0, 90, 0)
   if (!config?.enabled) {
+    // Nothing is displayed: drop the active allow-list so a stale URL cannot
+    // be replayed after the wallpaper was disabled.
+    registerActiveWallpaper([])
     return { enabled: false, kind: 'none', opacity, blur, dim }
   }
 
   if (config.source === 'workshop') {
     const item = config.workshopId ? await findWorkshopItem(config.workshopId) : undefined
     if (!item) {
+      registerActiveWallpaper([])
       return {
         enabled: true,
         kind: 'none',
@@ -503,8 +542,7 @@ export async function resolveWallpaper(config?: WallpaperConfig): Promise<Wallpa
         dim
       }
     }
-    allow(item.mediaPath)
-    allow(item.previewPath)
+    registerActiveWallpaper([item.mediaPath, item.previewPath])
     const kind = classify(item.mediaPath) ?? 'image'
     return {
       enabled: true,
@@ -524,6 +562,7 @@ export async function resolveWallpaper(config?: WallpaperConfig): Promise<Wallpa
   if (config.source === 'image' || config.source === 'video') {
     const file = config.path?.trim()
     if (!file || !existsSync(file)) {
+      registerActiveWallpaper([])
       return {
         enabled: true,
         kind: 'none',
@@ -534,7 +573,8 @@ export async function resolveWallpaper(config?: WallpaperConfig): Promise<Wallpa
       }
     }
     const kind = classify(file)
-    if (!kind || !allow(file)) {
+    if (!kind) {
+      registerActiveWallpaper([])
       return {
         enabled: true,
         kind: 'none',
@@ -544,6 +584,7 @@ export async function resolveWallpaper(config?: WallpaperConfig): Promise<Wallpa
         dim
       }
     }
+    registerActiveWallpaper([file])
     return {
       enabled: true,
       kind,
@@ -555,6 +596,7 @@ export async function resolveWallpaper(config?: WallpaperConfig): Promise<Wallpa
     }
   }
 
+  registerActiveWallpaper([])
   return { enabled: true, kind: 'none', opacity, blur, dim }
 }
 

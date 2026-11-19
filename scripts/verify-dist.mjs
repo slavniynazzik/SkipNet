@@ -12,7 +12,7 @@
  */
 import { existsSync, readdirSync, readFileSync, statSync } from 'fs'
 import path from 'path'
-import { MANIFEST_NAME, verifyManifestDir } from './build-binary-manifest.mjs'
+import { MANIFEST_NAME, parseManifestText, verifyManifestDir } from './build-binary-manifest.mjs'
 
 const root = process.cwd()
 const dist = path.join(root, 'dist')
@@ -102,7 +102,29 @@ const zapret = path.join(unpacked, 'resources', 'zapret')
 check(existsSync(zapret), 'missing bundled zapret directory')
 if (existsSync(zapret)) {
   const bats = readdirSync(zapret).filter((name) => /^general.*\.bat$/i.test(name))
-  check(bats.length === 22, `expected 22 zapret strategies, found ${bats.length}`)
+  // Do not hard-code the strategy count: it changes with the upstream Zapret
+  // bundle. Derive it from the checked manifest that ships next to the
+  // binaries, so a bundle update cannot make this check fail spuriously (C10).
+  let expectedStrategies = null
+  const strategyManifest = path.join(unpacked, 'resources', MANIFEST_NAME)
+  if (existsSync(strategyManifest)) {
+    try {
+      const entries = parseManifestText(readFileSync(strategyManifest, 'utf8'))
+      const count = [...entries.keys()].filter((relative) =>
+        /^zapret\/general.*\.bat$/i.test(relative)
+      ).length
+      if (count > 0) expectedStrategies = count
+    } catch (e) {
+      check(false, `cannot read strategy list from ${MANIFEST_NAME}: ${e.message}`)
+    }
+  }
+  check(bats.length > 0, 'no zapret strategies found')
+  if (expectedStrategies !== null) {
+    check(
+      bats.length === expectedStrategies,
+      `expected ${expectedStrategies} zapret strategies (from ${MANIFEST_NAME}), found ${bats.length}`
+    )
+  }
   check(existsSync(path.join(zapret, 'service.bat')), 'missing zapret service.bat')
   // The maintenance card launches the bundled PowerShell test suite and uses
   // `utils/check_updates.enabled`. If the folder is filtered out again, both

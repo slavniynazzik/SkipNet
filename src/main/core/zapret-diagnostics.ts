@@ -15,6 +15,7 @@ import { spawn, spawnSync } from 'node:child_process'
 import { zapretBundleDir } from '../utils/dirs'
 import { runPowerShellElevated } from '../utils/elevated'
 import { sysBin } from '../utils/sys-bin'
+import { appLog } from '../utils/app-logger'
 import { getFailedShortcuts } from '../resolve/shortcut-status'
 import { hostsHasYoutubeEntries } from './zapret-hosts'
 import { verifyZapretBundle } from './binary-integrity'
@@ -36,9 +37,32 @@ export interface DiagCheck {
   fix?: DiagFixId
 }
 
+/**
+ * One concrete side effect a diagnostic fix will perform. The renderer shows
+ * this list in the confirmation prompt *before* the destructive call is made
+ * (C9 / audit P1-12): deleting services or wiping Discord caches must never
+ * happen on a single unconfirmed click.
+ */
+export type DiagActionKind = 'service' | 'process' | 'path' | 'command'
+
+export interface DiagAction {
+  kind: DiagActionKind
+  /** Exact service name, process image, file path or command line. */
+  target: string
+  /** Human-readable explanation of what will happen to the target. */
+  details: string
+}
+
 export interface DiagnosticsReport {
   generatedAt: number
   checks: DiagCheck[]
+  /** Preview of every destructive action the offered fixes would perform. */
+  actions: DiagAction[]
+}
+
+/** Destructive fixes only run with an explicit `{ confirmed: true }`. */
+export interface DiagFixOptions {
+  confirmed?: boolean
 }
 
 function run(command: string, args: string[], timeout = 6000): string {
@@ -140,6 +164,124 @@ function dohConfigured(): boolean {
 
 const CONFLICTING_BYPASSES = ['GoodbyeDPI', 'discordfix_zapret', 'winws1', 'winws2']
 const WINDIVERT_NAMES = ['WinDivert', 'WinDivert14']
+
+const DISCORD_VARIANTS = [
+  { exe: 'Discord.exe', dir: 'discord' },
+  { exe: 'DiscordPTB.exe', dir: 'discordptb' },
+  { exe: 'DiscordCanary.exe', dir: 'discordcanary' },
+  { exe: 'DiscordDevelopment.exe', dir: 'discorddevelopment' }
+]
+const DISCORD_CACHE_SUBDIRS = ['Cache', 'Code Cache', 'GPUCache']
+
+// ---- Preview of destructive actions --------------------------------------
+
+function serviceActions(names: string[], action: string): DiagAction[] {
+  return names.map((name) => ({ kind: 'service', target: name, details: action }))
+}
+
+function describeTcpTimestamps(state: boolean | null): string {
+  if (state === true) return 'включены'
+  if (state === false) return 'отключены'
+  return 'не удалось определить'
+}
+
+function tcpTimestampsActions(state: boolean | null): DiagAction[] {
+  return [
+    {
+      kind: 'command',
+      target: 'netsh interface tcp set global timestamps=enabled',
+      details: `Глобальная настройка Windows. Предыдущее состояние TCP timestamps: ${describeTcpTimestamps(state)}.`
+    }
+  ]
+}
+
+function windivertActions(): DiagAction[] {
+  return serviceActions(
+    WINDIVERT_NAMES.filter((name) => serviceExists(name)),
+    'Служба драйвера будет остановлена и удалена (sc stop + sc delete).'
+  )
+}
+
+interface DiscordCacheTarget {
+  exe: string
+  dir: string
+  /** Absolute cache folders that exist right now, with their display name. */
+  dirs: Array<{ absolute: string; relative: string }>
+  running: boolean
+}
+
+interface DiscordPreview {
+  found: boolean
+  targets: DiscordCacheTarget[]
+  actions: DiagAction[]
+}
+
+/**
+ * Enumerate exactly what `clearDiscordCache` would touch. Read-only, so it can
+ * run inside `runZapretDiagnostics` and inside the pre-confirmation response.
+ */
+function previewDiscordCache(): DiscordPreview {
+  const appData = process.env.APPDATA
+  const preview: DiscordPreview = { found: false, targets: [], actions: [] }
+  if (!appData) return preview
+
+  for (const variant of DISCORD_VARIANTS) {
+    const root = path.join(appData, variant.dir)
+    if (!existsSync(root)) continue
+    preview.found = true
+    const dirs: Array<{ absolute: string; relative: string }> = []
+    for (const sub of DISCORD_CACHE_SUBDIRS) {
+      const absolute = path.join(root, sub)
+      if (!existsSync(absolute)) continue
+      dirs.push({ absolute, relative: path.join(variant.dir, sub) })
+      preview.actions.push({
+        kind: 'path',
+        target: absolute,
+        details: 'Папка кэша будет удалена без возможности восстановления.'
+      })
+    }
+    const running = processRunning(variant.exe)
+    if (running) {
+      preview.actions.push({
+        kind: 'process',
+        target: variant.exe,
+        details: 'Процесс будет завершён (taskkill /F), чтобы отпустить файлы кэша.'
+      })
+    }
+    preview.targets.push({ exe: variant.exe, dir: variant.dir, dirs, running })
+  }
+  return preview
+}
+
+/**
+ * Build the exact action list for a fix without changing anything. Used by the
+ * diagnostics report and by the `{ ok: false, ... }` "confirmation required"
+ * response, so the renderer can show it in `window.confirm`.
+ */
+export function previewDiagnosticFix(fix: DiagFixId): DiagAction[] {
+  if (fix === 'tcpTimestamps') return tcpTimestampsActions(tcpTimestampsEnabled())
+  if (fix === 'windivert') return windivertActions()
+  if (fix === 'conflictingBypasses') {
+    const actions = serviceActions(
+      CONFLICTING_BYPASSES.filter((name) => serviceExists(name)),
+      'Служба будет остановлена и удалена (sc stop + sc delete).'
+    )
+    // `removeConflictingBypasses` also removes WinDivert when our own bypass
+    // is not using it. Show that in the preview so nothing happens silently.
+    if (!isWinwsRunning()) actions.push(...windivertActions())
+    return actions
+  }
+  return previewDiscordCache().actions
+}
+
+function denyUnconfirmed(fix: DiagFixId, actions: DiagAction[]): DiagnosticsFixResult {
+  const message = actions.length
+    ? 'Действие изменяет систему и требует подтверждения. ' +
+      'Ничего не изменено — подтвердите список действий в интерфейсе.'
+    : 'Изменять нечего: подходящие службы или файлы не найдены.'
+  appLog('warn', `zapret diagnostics: ${fix} skipped — confirmation required, no changes made`)
+  return { ok: false, message, actions }
+}
 
 function listRunningServices(): string[] {
   const out = scList()
@@ -409,15 +551,47 @@ export function runZapretDiagnostics(): DiagnosticsReport {
       : { id: 'shortcuts', title: 'Глобальные горячие клавиши', status: 'ok' }
   )
 
-  return { generatedAt: Date.now(), checks }
+  // Preview of everything the offered fixes would change. The UI shows this
+  // list before asking for confirmation; main re-checks `confirmed` anyway.
+  const actions: DiagAction[] = []
+  if (timestamps === false) actions.push(...tcpTimestampsActions(timestamps))
+  if (!winwsRunning && windivertActive) actions.push(...windivertActions())
+  actions.push(
+    ...serviceActions(
+      bypasses,
+      'Служба будет остановлена и удалена (sc stop + sc delete).'
+    )
+  )
+  actions.push(...previewDiscordCache().actions)
+
+  const seen = new Set<string>()
+  const uniqueActions = actions.filter((action) => {
+    const key = `${action.kind}:${action.target}`
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+
+  return { generatedAt: Date.now(), checks, actions: uniqueActions }
 }
 
 export interface DiagnosticsFixResult {
   ok: boolean
   message: string
+  /** Exact actions the fix would perform / performed. */
+  actions?: DiagAction[]
 }
 
-export function fixTcpTimestamps(): DiagnosticsFixResult {
+export function fixTcpTimestamps(options: DiagFixOptions = {}): DiagnosticsFixResult {
+  const previous = tcpTimestampsEnabled()
+  const actions = tcpTimestampsActions(previous)
+  // This flips a *global* Windows TCP setting. Without an explicit
+  // confirmation from the UI it must be a no-op (C9 / audit P1-12).
+  if (options.confirmed !== true) return denyUnconfirmed('tcpTimestamps', actions)
+  if (previous === true) {
+    return { ok: true, message: 'TCP timestamps уже включены.', actions }
+  }
+
   const applyDirect = (): boolean => {
     const r = spawnSync(sysBin('netsh.exe'), ['interface', 'tcp', 'set', 'global', 'timestamps=enabled'], {
       windowsHide: true,
@@ -442,24 +616,28 @@ export function fixTcpTimestamps(): DiagnosticsFixResult {
 
   const state = tcpTimestampsEnabled()
   if (state === true) {
-    return { ok: true, message: 'TCP timestamps включены.' }
+    return { ok: true, message: 'TCP timestamps включены.', actions }
   }
   if (applied && state === null) {
     // The command succeeded but this Windows locale is unknown to us. Don't
     // claim a failure we cannot verify.
     return {
       ok: true,
-      message: 'Команда включения TCP timestamps выполнена. Перезапустите проверку при необходимости.'
+      message: 'Команда включения TCP timestamps выполнена. Перезапустите проверку при необходимости.',
+      actions
     }
   }
   return {
     ok: false,
     message:
-      'Не удалось включить TCP timestamps. Запустите SkipNet от администратора и повторите попытку.'
+      'Не удалось включить TCP timestamps. Запустите SkipNet от администратора и повторите попытку.',
+    actions
   }
 }
 
-export function fixWindivertConflict(): DiagnosticsFixResult {
+export function fixWindivertConflict(options: DiagFixOptions = {}): DiagnosticsFixResult {
+  const actions = windivertActions()
+  if (options.confirmed !== true) return denyUnconfirmed('windivert', actions)
   // Deleting the WinDivert service while our own winws.exe is capturing drops
   // the driver under the active session and silently breaks bypassing until
   // Zapret is restarted. The check only offers this fix when winws is down,
@@ -467,7 +645,8 @@ export function fixWindivertConflict(): DiagnosticsFixResult {
   if (isWinwsRunning()) {
     return {
       ok: false,
-      message: 'Zapret уже запущен и использует WinDivert. Сначала остановите Zapret.'
+      message: 'Zapret уже запущен и использует WinDivert. Сначала остановите Zapret.',
+      actions
     }
   }
   const messages: string[] = []
@@ -478,12 +657,19 @@ export function fixWindivertConflict(): DiagnosticsFixResult {
     messages.push(name)
   }
   if (messages.length === 0) {
-    return { ok: true, message: 'Зависшая служба WinDivert не найдена.' }
+    return { ok: true, message: 'Зависшая служба WinDivert не найдена.', actions }
   }
-  return { ok: true, message: `Удалены службы: ${messages.join(', ')}.` }
+  return { ok: true, message: `Удалены службы: ${messages.join(', ')}.`, actions }
 }
 
-export function removeConflictingBypasses(): DiagnosticsFixResult {
+export function removeConflictingBypasses(
+  options: DiagFixOptions = {}
+): DiagnosticsFixResult {
+  const actions = previewDiagnosticFix('conflictingBypasses')
+  // Removing another product's service is irreversible from SkipNet's point
+  // of view; require the exact list to be confirmed first (C9).
+  if (options.confirmed !== true) return denyUnconfirmed('conflictingBypasses', actions)
+
   const removed: string[] = []
   for (const name of CONFLICTING_BYPASSES) {
     if (!serviceExists(name)) continue
@@ -494,16 +680,23 @@ export function removeConflictingBypasses(): DiagnosticsFixResult {
   // Only clean up WinDivert when our own bypass is not using it. Deleting the
   // service while winws.exe runs drops the driver the active session depends
   // on and silently breaks bypassing until Zapret is restarted.
+  const removedWindivert: string[] = []
   if (!isWinwsRunning()) {
     for (const name of WINDIVERT_NAMES) {
       if (!serviceExists(name)) continue
       run(sysBin('sc.exe'), ['stop', name], 6000)
       run(sysBin('sc.exe'), ['delete', name], 6000)
+      removedWindivert.push(name)
     }
   }
-  return removed.length
-    ? { ok: true, message: `Удалены службы: ${removed.join(', ')}.` }
-    : { ok: true, message: 'Конфликтующие службы не найдены.' }
+  const all = [...removed, ...removedWindivert]
+  return all.length
+    ? {
+        ok: true,
+        message: `Удалены службы: ${all.join(', ')}.`,
+        actions
+      }
+    : { ok: true, message: 'Конфликтующие службы не найдены.', actions }
 }
 
 // ---- Auto-update check toggle --------------------------------------------
@@ -581,42 +774,74 @@ export function runZapretTests(): RunTestsResult {
 // ---- Discord cache cleanup ------------------------------------------------
 
 export interface DiscordCacheResult {
+  ok: boolean
+  message: string
   closed: string[]
   cleared: string[]
   failed: string[]
   found: boolean
+  /** Exact files/processes the action would touch (also set on refusal). */
+  actions: DiagAction[]
 }
 
-/** Close Discord and delete its Cache / Code Cache / GPUCache folders. */
-export function clearDiscordCache(): DiscordCacheResult {
-  const appData = process.env.APPDATA
-  const variants = [
-    { exe: 'Discord.exe', dir: 'discord' },
-    { exe: 'DiscordPTB.exe', dir: 'discordptb' },
-    { exe: 'DiscordCanary.exe', dir: 'discordcanary' },
-    { exe: 'DiscordDevelopment.exe', dir: 'discorddevelopment' }
-  ]
-  const result: DiscordCacheResult = { closed: [], cleared: [], failed: [], found: false }
-  if (!appData) return result
-
-  for (const v of variants) {
-    const root = path.join(appData, v.dir)
-    if (!existsSync(root)) continue
-    result.found = true
-    if (processRunning(v.exe)) {
-      run(sysBin('taskkill.exe'), ['/IM', v.exe, '/F'], 8000)
-      result.closed.push(v.exe)
+/**
+ * Close Discord and delete its Cache / Code Cache / GPUCache folders.
+ *
+ * Killing a user's chat client and deleting folders is destructive, so the
+ * function is a no-op unless the caller passes `{ confirmed: true }`. On
+ * refusal it returns the exact list of processes and paths in `actions`, which
+ * the renderer shows in `window.confirm` before retrying.
+ */
+export function clearDiscordCache(options: DiagFixOptions = {}): DiscordCacheResult {
+  const preview = previewDiscordCache()
+  if (options.confirmed !== true) {
+    appLog(
+      'warn',
+      'zapret diagnostics: discordCache skipped — confirmation required, no files deleted'
+    )
+    return {
+      ok: false,
+      message: preview.actions.length
+        ? 'Очистка кэша Discord требует подтверждения. Ничего не удалено — подтвердите список действий в интерфейсе.'
+        : 'Нечего удалять: установка Discord или папки кэша не найдены.',
+      closed: [],
+      cleared: [],
+      failed: [],
+      found: preview.found,
+      actions: preview.actions
     }
-    for (const sub of ['Cache', 'Code Cache', 'GPUCache']) {
-      const dir = path.join(root, sub)
-      if (!existsSync(dir)) continue
+  }
+
+  const result: DiscordCacheResult = {
+    ok: true,
+    message: '',
+    closed: [],
+    cleared: [],
+    failed: [],
+    found: preview.found,
+    actions: preview.actions
+  }
+
+  for (const target of preview.targets) {
+    if (target.running) {
+      run(sysBin('taskkill.exe'), ['/IM', target.exe, '/F'], 8000)
+      result.closed.push(target.exe)
+    }
+    for (const dir of target.dirs) {
       try {
-        rmSync(dir, { recursive: true, force: true })
-        result.cleared.push(path.join(v.dir, sub))
+        rmSync(dir.absolute, { recursive: true, force: true })
+        result.cleared.push(dir.relative)
       } catch {
-        result.failed.push(path.join(v.dir, sub))
+        result.failed.push(dir.relative)
       }
     }
   }
+
+  result.ok = result.failed.length === 0
+  result.message = !result.found
+    ? 'Установки Discord не найдены.'
+    : result.failed.length
+      ? `Очищено папок: ${result.cleared.length}, ошибок: ${result.failed.length}.`
+      : `Очищено папок кэша: ${result.cleared.length}.`
   return result
 }

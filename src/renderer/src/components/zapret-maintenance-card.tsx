@@ -26,6 +26,7 @@ import {
   zapretRunDiagnostics,
   zapretRunTests,
   zapretSetAutoUpdateCheck,
+  type DiagAction,
   type DiagCheck,
   type DiagStatus,
   type DiagnosticsReport
@@ -35,6 +36,26 @@ interface Props {
   disabled?: boolean
   disabledReason?: string
   refreshKey?: string | number
+}
+
+const ACTION_LABEL: Record<DiagAction['kind'], string> = {
+  service: 'Служба',
+  process: 'Процесс',
+  path: 'Папка',
+  command: 'Команда'
+}
+
+/**
+ * Render the exact list of side effects returned by the main process. The
+ * confirmation is shown *before* the destructive call; main repeats the
+ * `confirmed` check and refuses without it, so a bypassed dialog changes
+ * nothing (C9 / audit P1-12).
+ */
+function confirmDiagnosticActions(title: string, actions: DiagAction[]): boolean {
+  const lines = actions.map(
+    (action) => `• ${ACTION_LABEL[action.kind]}: ${action.target}\n    ${action.details}`
+  )
+  return window.confirm(`${title}\n\n${lines.join('\n')}\n\nПродолжить?`)
 }
 
 const ZapretMaintenanceCard: React.FC<Props> = ({ disabled = false, disabledReason, refreshKey }) => {
@@ -98,11 +119,25 @@ const ZapretMaintenanceCard: React.FC<Props> = ({ disabled = false, disabledReas
   const applyFix = async (check: DiagCheck): Promise<void> => {
     if (!check.fix || fixing) return
     setFixing(check.id)
-    const tId = toast.loading('Применяем исправление…')
+    let shouldRefresh = false
+    const tId = toast.loading('Готовим исправление…')
     try {
-      const result = await zapretDiagnosticsFix(check.fix)
-      if (result.ok) toast.success(result.message, { id: tId })
-      else toast.error(result.message, { id: tId })
+      // The first call is a preview: main refuses destructive fixes without
+      // `confirmed` and returns the exact services/paths/commands involved.
+      const preview = await zapretDiagnosticsFix(check.fix)
+      if (preview.ok) {
+        toast.success(preview.message, { id: tId })
+        shouldRefresh = true
+      } else if (!preview.actions?.length) {
+        toast.info(preview.message, { id: tId })
+      } else if (!confirmDiagnosticActions('Подтвердите исправление', preview.actions)) {
+        toast.info('Отменено — изменения не применены', { id: tId })
+      } else {
+        const result = await zapretDiagnosticsFix(check.fix, true)
+        if (result.ok) toast.success(result.message, { id: tId })
+        else toast.error(result.message, { id: tId })
+        shouldRefresh = true
+      }
     } catch (e) {
       toast.error('Не удалось применить исправление', {
         id: tId,
@@ -111,7 +146,7 @@ const ZapretMaintenanceCard: React.FC<Props> = ({ disabled = false, disabledReas
     } finally {
       setFixing(null)
     }
-    void runDiagnostics(true)
+    if (shouldRefresh) void runDiagnostics(true)
   }
 
   const runTests = async (): Promise<void> => {
@@ -132,18 +167,31 @@ const ZapretMaintenanceCard: React.FC<Props> = ({ disabled = false, disabledReas
 
   const clearDiscord = async (): Promise<void> => {
     if (discordBusy) return
-    if (!window.confirm('Закрыть Discord и удалить кэш (Cache, Code Cache, GPUCache)?')) return
     setDiscordBusy(true)
-    const tId = toast.loading('Очищаем кэш Discord…')
+    const tId = toast.loading('Проверяем кэш Discord…')
     try {
-      const result = await zapretClearDiscordCache()
-      if (!result.found) {
-        toast.error('Установки Discord не найдены', { id: tId })
+      // Preview first: without `confirmed` main refuses and returns the exact
+      // process and folder list. Nothing is deleted until the user agrees.
+      const preview = await zapretClearDiscordCache()
+      if (!preview.actions.length) {
+        toast.info(preview.message, { id: tId })
+        return
+      }
+      if (!confirmDiagnosticActions('Закрыть Discord и удалить кэш?', preview.actions)) {
+        toast.info('Отменено — ничего не удалено', { id: tId })
+        return
+      }
+      const result = await zapretClearDiscordCache(true)
+      if (result.failed.length) {
+        toast.error(result.message, {
+          id: tId,
+          description: `Не удалось удалить: ${result.failed.join(', ')}`
+        })
       } else {
-        toast.success('Кэш Discord очищен', {
+        toast.success(result.message, {
           id: tId,
           description: `${result.cleared.length} папок удалено${
-            result.failed.length ? `, ошибок: ${result.failed.length}` : ''
+            result.closed.length ? `, закрыто: ${result.closed.join(', ')}` : ''
           }.`
         })
       }

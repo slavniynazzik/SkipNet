@@ -27,13 +27,10 @@
   DeleteRegValue SHCTX "${UNINSTALL_REGISTRY_KEY}" "HelpLink"
   DeleteRegValue SHCTX "${UNINSTALL_REGISTRY_KEY}" "URLUpdateInfo"
 
-  ; Hide the "Version" column - electron-builder writes DisplayVersion from
-  ; package.json. Removing both DisplayVersion and the numeric Major/Minor
-  ; pair makes Programs & Features leave the column blank for SkipNet.
-  DeleteRegValue SHCTX "${UNINSTALL_REGISTRY_KEY}" "DisplayVersion"
-  DeleteRegValue SHCTX "${UNINSTALL_REGISTRY_KEY}" "VersionMajor"
-  DeleteRegValue SHCTX "${UNINSTALL_REGISTRY_KEY}" "VersionMinor"
-  DeleteRegValue SHCTX "${UNINSTALL_REGISTRY_KEY}" "Version"
+  ; The "Version" column is deliberately LEFT ALONE: electron-builder writes
+  ; DisplayVersion (and the numeric VersionMajor/VersionMinor pair) from
+  ; package.json, and users must be able to tell installed builds apart in
+  ; Programs & Features. Only the URL columns are removed.
 
   ; --- Pre-rebrand cleanup ---------------------------------------------------
   ; SkipNet may be installed over an older Slipgate build. Remove the old
@@ -116,6 +113,15 @@
   ; (developer sandbox, see src/main/index.ts -> app.setName). We also wipe
   ; the pre-rebrand `slipgate` / `slipgate-dev` folders so an upgraded
   ; machine is left completely clean.
+  ;
+  ; MULTI-USER SAFETY (CA2 / audit P1-2): a previous version of this
+  ; uninstaller walked `C:\Users\*` and deleted every profile's
+  ; %APPDATA%/%LOCALAPPDATA%\skipnet. On a shared machine that destroyed
+  ; other users' settings and TgWs secrets without their consent, and the
+  ; loop also followed directory junctions. We now ONLY touch the profile
+  ; that is actually running the uninstaller. Other users keep their data
+  ; until they uninstall / reset it themselves. A machine-wide install no
+  ; longer implies a machine-wide data wipe.
   SetShellVarContext current
   RMDir /r "$APPDATA\skipnet"
   RMDir /r "$LOCALAPPDATA\skipnet"
@@ -127,39 +133,31 @@
   RMDir /r "$LOCALAPPDATA\slipgate-dev"
   SetShellVarContext all
 
-  ; 6. Best-effort wipe for *other* users on the same machine, since
-  ;    perMachine installs may have been used by anyone. We iterate over
-  ;    C:\Users\* and remove any SkipNet userData under each profile.
-  ;    Failures are silent - we can't always touch other users' folders
-  ;    and that's fine; the per-user uninstaller will catch the rest.
-  StrCpy $0 "$PROFILE\.."
-  FindFirst $1 $2 "$0\*"
-  user_loop:
-    StrCmp $2 "" user_done
-    StrCmp $2 "."         user_next
-    StrCmp $2 ".."        user_next
-    StrCmp $2 "Public"    user_next
-    StrCmp $2 "Default"   user_next
-    StrCmp $2 "Default User" user_next
-    StrCmp $2 "All Users" user_next
-    RMDir /r "$0\$2\AppData\Roaming\skipnet"
-    RMDir /r "$0\$2\AppData\Local\skipnet"
-    RMDir /r "$0\$2\AppData\Roaming\skipnet-dev"
-    RMDir /r "$0\$2\AppData\Local\skipnet-dev"
-    RMDir /r "$0\$2\AppData\Roaming\slipgate"
-    RMDir /r "$0\$2\AppData\Local\slipgate"
-    RMDir /r "$0\$2\AppData\Roaming\slipgate-dev"
-    RMDir /r "$0\$2\AppData\Local\slipgate-dev"
-  user_next:
-    FindNext $1 $2
-    Goto user_loop
-  user_done:
-  FindClose $1
+  ; 6. WinDivert kernel-driver service. winws.exe creates/uses a service for
+  ;    the bundled WinDivert64.sys. The .sys lives under $INSTDIR and is being
+  ;    removed, so leaving the service registration behind would produce a
+  ;    broken service (error 577/1058) that blocks the next install from
+  ;    loading the driver. Stop first (ignore errors when it is not running),
+  ;    then delete the registration. This runs only on a real uninstall: the
+  ;    upgrade guard above already skipped the whole block for in-place
+  ;    updates.
+  ;
+  ;    Trade-off: `sc delete` is unconditional because parsing localised
+  ;    `sc qc` output in NSIS is brittle. If another DPI-bypass install shares
+  ;    these exact WinDivert service names, its registration is removed too;
+  ;    the shared driver files are not touched. `sc` service lookup is
+  ;    case-insensitive, so WinDivert / windivert need one entry only.
+  nsExec::ExecToLog 'sc stop WinDivert'
+  nsExec::ExecToLog 'sc stop WinDivert14'
+  nsExec::ExecToLog 'sc stop WinDivert64'
+  nsExec::ExecToLog 'sc delete WinDivert'
+  nsExec::ExecToLog 'sc delete WinDivert14'
+  nsExec::ExecToLog 'sc delete WinDivert64'
 
-  ; 7. Make sure the install directory itself is emptied - electron-builder
-  ;    already deletes registered files, but some users / antivirus may
-  ;    leave runtime-created stragglers (logs, generated configs, etc.).
-  RMDir /r "$INSTDIR"
+  ; NOTE: the install directory is removed by electron-builder's own
+  ; uninstaller *after* this macro returns. Do not `RMDir /r "$INSTDIR"`
+  ; here as well: removing it twice raced with the upstream cleanup and
+  ; could leave the uninstaller reporting a failed removal.
 
   skipnet_skip_wipe:
 !macroend
