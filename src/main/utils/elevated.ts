@@ -20,7 +20,7 @@
  */
 
 import { spawnSync } from 'node:child_process'
-import path from 'node:path'
+import { sysBin } from './sys-bin'
 
 /** Buckets a caller can act on: retry, show a UAC hint, or report a script error. */
 export type ElevatedOutcome = 'success' | 'uac-cancelled' | 'failed'
@@ -45,16 +45,8 @@ export const UAC_CANCELLED_MARKER = 'SKIPNET_UAC_CANCELLED'
 /** Same numeric value as ERROR_CANCELLED, used as the launcher's exit code. */
 export const UAC_CANCELLED_EXIT_CODE = 1223
 
-function windowsRoot(): string {
-  const raw = (process.env.SystemRoot || process.env.windir || 'C:\\Windows').replace(
-    /[\\/]+$/,
-    ''
-  )
-  return /^[a-z]:\\(?:Windows|WINNT)$/i.test(raw) ? raw : 'C:\\Windows'
-}
-
 function powershellPath(): string {
-  return path.join(windowsRoot(), 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+  return sysBin('powershell.exe')
 }
 
 /** `-EncodedCommand` payload: UTF-16LE with a BOM, base64-encoded. */

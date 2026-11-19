@@ -1,4 +1,4 @@
-import { ipcMain, app, shell, clipboard, BrowserWindow } from 'electron'
+import { ipcMain, app, clipboard, BrowserWindow } from 'electron'
 import { getAppConfig, patchAppConfig } from '../config'
 import { applyTheme, setNativeTheme } from '../resolve/theme'
 import {
@@ -89,140 +89,11 @@ import {
   installAppUpdate,
   dismissAppUpdate
 } from '../core/app-updater'
-import { execFile } from 'node:child_process'
-import { writeFileSync, unlinkSync } from 'node:fs'
 import path from 'node:path'
 import { isTrustedFrameUrl, type TrustedFrameOptions } from './ipc-trust'
 import { appLog } from './app-logger'
+import { openTelegramLink } from './telegram-launch'
 import type { InvokeChannel } from '../../shared/ipc-channels'
-
-//
-function logTgError(stage: string, err: Error | null, stderr?: string): void {
-  if (!err && !stderr) return
-  const msg = err?.message ?? stderr ?? 'unknown'
-  console.error(`[openTelegramLink] ${stage}: ${msg.trim()}`)
-}
-
-function tryFallbackOpen(url: string): void {
-  shell.openExternal(url).catch((e) => logTgError('shell.openExternal', e))
-}
-
-function openTgLinkViaScheduler(url: string, fellBack: { v: boolean }): boolean {
-  try {
-    const taskName = `SkipNet_OpenTG_${Date.now()}_${Math.floor(Math.random() * 10000)}`
-    const vbsPath = path.join(app.getPath('temp'), `${taskName}.vbs`)
-    const vbsSafeUrl = url.replace(/"/g, '""')
-    const vbsContent =
-      'On Error Resume Next\r\n' +
-      `CreateObject("Shell.Application").ShellExecute "${vbsSafeUrl}"\r\n`
-    writeFileSync(vbsPath, vbsContent, 'utf8')
-
-    // Wrap the wscript invocation in a single /TR string. //B = batch
-    // mode (suppress all script-engine UI), //Nologo = suppress the
-    // WSH banner. Path is double-quoted to survive spaces in %TEMP%.
-    const trCommand = `wscript.exe //B //Nologo "${vbsPath}"`
-
-    const cleanup = (): void => {
-      execFile(
-        'schtasks.exe',
-        ['/Delete', '/F', '/TN', taskName],
-        { windowsHide: true },
-        () => {
-          try { unlinkSync(vbsPath) } catch { /* noop */ }
-        }
-      )
-    }
-
-    // /SC ONCE wants a future-ish time. We use the far future so the
-    // task never auto-fires; we always trigger via /Run.
-    execFile(
-      'schtasks.exe',
-      [
-        '/Create', '/F',
-        '/TN', taskName,
-        '/TR', trCommand,
-        '/SC', 'ONCE',
-        '/ST', '23:59',
-        '/SD', '01/01/2099',
-        '/IT',
-        '/RL', 'LIMITED'
-      ],
-      { windowsHide: true },
-      (createErr, _stdout, createStderr) => {
-        if (createErr) {
-          logTgError('schtasks /Create', createErr, createStderr)
-          if (!fellBack.v) {
-            fellBack.v = true
-            tryFallbackOpen(url)
-          }
-          try { unlinkSync(vbsPath) } catch { /* noop */ }
-          return
-        }
-        execFile(
-          'schtasks.exe',
-          ['/Run', '/TN', taskName],
-          { windowsHide: true },
-          (runErr, _so, runStderr) => {
-            if (runErr) {
-              logTgError('schtasks /Run', runErr, runStderr)
-              if (!fellBack.v) {
-                fellBack.v = true
-                tryFallbackOpen(url)
-              }
-            }
-            // Delete task + vbs 5 s later (after TG had time to launch).
-            setTimeout(cleanup, 5000)
-          }
-        )
-      }
-    )
-    return true
-  } catch (e) {
-    logTgError('openTgLinkViaScheduler sync', e as Error)
-    return false
-  }
-}
-
-const TG_INFLIGHT_LOCK_MS = 600
-let tgInflightUntil = 0
-
-/**
- * The renderer only ever needs to open a generated `tg://proxy` link, but the
- * handler is reachable with any string. Restrict it to Telegram URLs so it
- * cannot be used to launch an arbitrary local file or protocol handler at the
- * app's (elevated) integrity level.
- */
-function isAllowedTelegramUrl(url: string): boolean {
-  try {
-    const parsed = new URL(url)
-    if (parsed.protocol === 'tg:') return true
-    return (
-      parsed.protocol === 'https:' &&
-      (parsed.hostname === 't.me' || parsed.hostname === 'telegram.me')
-    )
-  } catch {
-    return false
-  }
-}
-
-function openTelegramLink(url: string): Promise<void> {
-  if (!isAllowedTelegramUrl(url)) {
-    // Never log the URL itself: a proxy link contains the MTProto secret.
-    logTgError('rejected url', null, 'unsupported scheme/host')
-    return Promise.resolve()
-  }
-  const now = Date.now()
-  if (now < tgInflightUntil) return Promise.resolve()
-  tgInflightUntil = now + TG_INFLIGHT_LOCK_MS
-  if (process.platform === 'win32') {
-    const fellBack = { v: false }
-    if (openTgLinkViaScheduler(url, fellBack)) return Promise.resolve()
-    if (!fellBack.v) tryFallbackOpen(url)
-    return Promise.resolve()
-  }
-  tryFallbackOpen(url)
-  return Promise.resolve()
-}
 
 interface IpcFailure {
   ok: false

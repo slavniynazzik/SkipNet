@@ -1,9 +1,11 @@
 import { existsSync, mkdirSync, writeFileSync, unlinkSync } from 'fs'
-import { spawn, spawnSync } from 'child_process'
+import { spawn } from 'child_process'
 import { randomUUID } from 'crypto'
 import path from 'path'
 import { app } from 'electron'
 import { dataDir, isPortable } from '../utils/dirs'
+import { sysBin } from '../utils/sys-bin'
+import { killAllOwnedSync } from './process-kill'
 import { getAppConfig, patchAppConfig } from '../config'
 import type { PersistedUpdateCache, UpdateCacheMetadata } from '../utils/update-cache'
 import { loadUpdateCache, saveUpdateCache } from '../utils/update-cache'
@@ -356,16 +358,13 @@ export async function installAppUpdate(tag: string): Promise<{ scheduled: true }
     /* best-effort */
   }
   await Promise.all([stopZapret().catch(() => void 0), stopTgws().catch(() => void 0)])
-  // Belt and braces: kill anything still holding the bundle open.
-  for (const image of ['winws.exe', 'TgWsProxy_windows.exe']) {
-    try {
-      spawnSync('taskkill.exe', ['/F', '/IM', image, '/T'], {
-        windowsHide: true,
-        timeout: 5000
-      })
-    } catch {
-      /* noop */
-    }
+  // Belt and braces: kill anything still holding the bundle open. C7 — tracked
+  // PIDs first, then processes whose executable is inside our resources tree;
+  // a stranger's winws.exe is left running.
+  try {
+    killAllOwnedSync()
+  } catch {
+    /* noop */
   }
 
   // Spawn detached so the installer survives our app.quit(). Wait for the
@@ -483,7 +482,7 @@ export async function installAppUpdate(tag: string): Promise<{ scheduled: true }
         flag: 'wx'
       })
       const watcher = spawn(
-        'powershell.exe',
+        sysBin('powershell.exe'),
         [
           '-NoProfile',
           '-WindowStyle',

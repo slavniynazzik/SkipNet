@@ -8,6 +8,8 @@ import { tgwsBinaryPath } from '../utils/dirs'
 import { getAppConfig, patchAppConfig } from '../config'
 import { verifyTgwsBinary } from './binary-integrity'
 import { redactSecrets } from '../utils/redact'
+import { killOwnedComponent, taskkillTree } from './process-kill'
+import { trackProcess, untrackProcess } from './process-ownership'
 
 // ---- module state ----------------------------------------------------------
 
@@ -102,19 +104,14 @@ function tryListen(host: string, port: number): Promise<{ free: true } | { free:
 }
 
 async function killStaleTgws(): Promise<boolean> {
-  // Kill any leftover TgWsProxy_windows.exe — typically a previous SkipNet
-  // process that crashed without releasing the port. This is safe because the
-  // binary is unique to our app; users normally don't run it standalone.
+  // C7: stop only our own TgWsProxy — the tracked PID this instance spawned,
+  // or an orphan whose executable path is inside `resources/tgws`. A
+  // standalone TgWsProxy from another folder is left alone.
   if (process.platform !== 'win32') return false
   try {
-    await new Promise<void>((resolve) => {
-      const p = spawn('taskkill.exe', ['/F', '/IM', 'TgWsProxy_windows.exe', '/T'], {
-        windowsHide: true
-      })
-      p.on('exit', () => resolve())
-      p.on('error', () => resolve())
-    })
-    log('info', 'stale TgWsProxy_windows.exe instances killed')
+    const killed = await killOwnedComponent('tgws', ['TgWsProxy_windows.exe'])
+    if (killed.length === 0) return false
+    log('info', `stale TgWsProxy_windows.exe stopped (pids: ${killed.join(', ')})`)
     // Give Windows time to release the port.
     await new Promise((r) => setTimeout(r, 500))
     return true
@@ -285,6 +282,7 @@ async function startTgwsImpl(): Promise<void> {
     log('info', `spawning: ${bin} ${args.map((arg) => redactSecrets(arg)).join(' ')}`)
     const proc = spawn(bin, args, { windowsHide: true })
     child = proc
+    trackProcess(proc.pid, bin, 'tgws')
 
     proc.stdout?.on('data', (buf) => log('info', buf.toString().trimEnd()))
     proc.stderr?.on('data', (buf) => {
@@ -293,6 +291,7 @@ async function startTgwsImpl(): Promise<void> {
     })
     proc.on('error', (err) => {
       log('error', `child error: ${err.message}`)
+      untrackProcess(proc.pid)
       // Ignore events from a process we already replaced (e.g. a stop that
       // timed out and a new start that began before the old exit arrived).
       if (child !== proc) return
@@ -301,6 +300,7 @@ async function startTgwsImpl(): Promise<void> {
     })
     proc.on('exit', (code, signal) => {
       log('info', `exited code=${code} signal=${signal ?? 'none'}`)
+      untrackProcess(proc.pid)
       // A late exit from an older process must not clobber the state of the
       // process that is currently running.
       if (child !== proc) return
@@ -333,6 +333,7 @@ async function startTgwsImpl(): Promise<void> {
     setStatus({ state: 'error', lastError: msg, pid: undefined })
     if (child) {
       try { child.kill('SIGKILL') } catch { /* noop */ }
+      untrackProcess(child.pid)
       child = null
     }
     throw e
@@ -352,17 +353,15 @@ async function stopTgwsImpl(): Promise<void> {
 
   try {
     if (process.platform === 'win32' && pid) {
-      await new Promise<void>((resolve) => {
-        const p = spawn('taskkill.exe', ['/F', '/T', '/PID', String(pid)], { windowsHide: true })
-        p.on('exit', () => resolve())
-        p.on('error', () => resolve())
-      })
+      // C7: only the exact PID we spawned (with its worker-pool children).
+      await taskkillTree(pid)
     } else {
       proc.kill('SIGTERM')
     }
   } catch (e) {
     log('warn', `kill failed: ${e}`)
   }
+  untrackProcess(pid)
 
   // Wait for the process to actually exit. `taskkill /F /T` is synchronous on
   // the OS side — by the time the spawn above returns, the process tree is

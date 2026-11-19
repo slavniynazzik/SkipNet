@@ -14,6 +14,8 @@ import path from 'node:path'
 import { spawn, spawnSync } from 'node:child_process'
 import { zapretBundleDir } from '../utils/dirs'
 import { runPowerShellElevated } from '../utils/elevated'
+import { sysBin } from '../utils/sys-bin'
+import { getFailedShortcuts } from '../resolve/shortcut-status'
 import { hostsHasYoutubeEntries } from './zapret-hosts'
 import { verifyZapretBundle } from './binary-integrity'
 
@@ -53,16 +55,24 @@ function run(command: string, args: string[], timeout = 6000): string {
 }
 
 function scList(): string {
-  return run('sc.exe', ['query'], 8000)
+  return run(sysBin('sc.exe'), ['query'], 8000)
 }
 
 function serviceExists(name: string): boolean {
-  const r = spawnSync('sc.exe', ['query', name], { windowsHide: true, timeout: 3000, encoding: 'utf8' })
+  const r = spawnSync(sysBin('sc.exe'), ['query', name], { windowsHide: true, timeout: 3000, encoding: 'utf8' })
   return r.status === 0
 }
 
+/**
+ * Is a Windows service running? Exported so the Zapret preflight can fail fast
+ * on a stopped BFE instead of waiting out the 7-second winws health window (S3).
+ */
+export function isWindowsServiceRunning(name: string): boolean {
+  return serviceRunning(name)
+}
+
 function serviceRunning(name: string): boolean {
-  const out = run('sc.exe', ['query', name], 4000)
+  const out = run(sysBin('sc.exe'), ['query', name], 4000)
   // `sc.exe` localises the field label (STATE / СОСТОЯНИЕ / …), but keeps the
   // numeric state and the RUNNING token in English. Match the value only,
   // otherwise every service looks stopped on non-English Windows.
@@ -70,17 +80,17 @@ function serviceRunning(name: string): boolean {
 }
 
 function isWinwsRunning(): boolean {
-  const out = run('tasklist.exe', ['/FI', 'IMAGENAME eq winws.exe', '/NH'], 5000)
+  const out = run(sysBin('tasklist.exe'), ['/FI', 'IMAGENAME eq winws.exe', '/NH'], 5000)
   return /winws\.exe/i.test(out)
 }
 
 function processRunning(image: string): boolean {
-  const out = run('tasklist.exe', ['/FI', `IMAGENAME eq ${image}`, '/NH'], 5000)
+  const out = run(sysBin('tasklist.exe'), ['/FI', `IMAGENAME eq ${image}`, '/NH'], 5000)
   return new RegExp(image.replace(/\./g, '\\.'), 'i').test(out)
 }
 
 function tcpTimestampsEnabled(): boolean | null {
-  const out = run('netsh.exe', ['interface', 'tcp', 'show', 'global'], 5000)
+  const out = run(sysBin('netsh.exe'), ['interface', 'tcp', 'show', 'global'], 5000)
   // Field names are localised: "RFC 1323 Timestamps" on English Windows,
   // "Метки времени RFC 1323" on Russian, etc. The value stays English.
   const line = out
@@ -93,7 +103,7 @@ function tcpTimestampsEnabled(): boolean | null {
 }
 
 function proxyEnabled(): { enabled: boolean; server: string } {
-  const out = run('reg.exe', [
+  const out = run(sysBin('reg.exe'), [
     'query',
     'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings',
     '/v',
@@ -103,7 +113,7 @@ function proxyEnabled(): { enabled: boolean; server: string } {
   const value = m ? Number(m[1]) : 0
   let server = ''
   if (value === 1) {
-    const s = run('reg.exe', [
+    const s = run(sysBin('reg.exe'), [
       'query',
       'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings',
       '/v',
@@ -116,7 +126,7 @@ function proxyEnabled(): { enabled: boolean; server: string } {
 }
 
 function dohConfigured(): boolean {
-  const out = run('reg.exe', [
+  const out = run(sysBin('reg.exe'), [
     'query',
     'HKLM\\SYSTEM\\CurrentControlSet\\Services\\Dnscache\\InterfaceSpecificParameters',
     '/s',
@@ -386,6 +396,19 @@ export function runZapretDiagnostics(): DiagnosticsReport {
       : { id: 'bypasses', title: 'Другие обходы', status: 'ok' }
   )
 
+  const failedShortcuts = getFailedShortcuts()
+  checks.push(
+    failedShortcuts.length > 0
+      ? {
+          id: 'shortcuts',
+          title: 'Глобальные горячие клавиши',
+          status: 'warn',
+          detail: `Не удалось зарегистрировать: ${failedShortcuts.join(', ')}`,
+          hint: 'Комбинацию уже использует другое приложение. Выберите другую в настройках.'
+        }
+      : { id: 'shortcuts', title: 'Глобальные горячие клавиши', status: 'ok' }
+  )
+
   return { generatedAt: Date.now(), checks }
 }
 
@@ -396,7 +419,7 @@ export interface DiagnosticsFixResult {
 
 export function fixTcpTimestamps(): DiagnosticsFixResult {
   const applyDirect = (): boolean => {
-    const r = spawnSync('netsh.exe', ['interface', 'tcp', 'set', 'global', 'timestamps=enabled'], {
+    const r = spawnSync(sysBin('netsh.exe'), ['interface', 'tcp', 'set', 'global', 'timestamps=enabled'], {
       windowsHide: true,
       timeout: 10_000,
       encoding: 'utf8'
@@ -450,8 +473,8 @@ export function fixWindivertConflict(): DiagnosticsFixResult {
   const messages: string[] = []
   for (const name of WINDIVERT_NAMES) {
     if (!serviceExists(name)) continue
-    run('sc.exe', ['stop', name], 6000)
-    run('sc.exe', ['delete', name], 6000)
+    run(sysBin('sc.exe'), ['stop', name], 6000)
+    run(sysBin('sc.exe'), ['delete', name], 6000)
     messages.push(name)
   }
   if (messages.length === 0) {
@@ -464,8 +487,8 @@ export function removeConflictingBypasses(): DiagnosticsFixResult {
   const removed: string[] = []
   for (const name of CONFLICTING_BYPASSES) {
     if (!serviceExists(name)) continue
-    run('sc.exe', ['stop', name], 6000)
-    run('sc.exe', ['delete', name], 6000)
+    run(sysBin('sc.exe'), ['stop', name], 6000)
+    run(sysBin('sc.exe'), ['delete', name], 6000)
     removed.push(name)
   }
   // Only clean up WinDivert when our own bypass is not using it. Deleting the
@@ -474,8 +497,8 @@ export function removeConflictingBypasses(): DiagnosticsFixResult {
   if (!isWinwsRunning()) {
     for (const name of WINDIVERT_NAMES) {
       if (!serviceExists(name)) continue
-      run('sc.exe', ['stop', name], 6000)
-      run('sc.exe', ['delete', name], 6000)
+      run(sysBin('sc.exe'), ['stop', name], 6000)
+      run(sysBin('sc.exe'), ['delete', name], 6000)
     }
   }
   return removed.length
@@ -540,7 +563,7 @@ export function runZapretTests(): RunTestsResult {
   }
   try {
     const p = spawn(
-      'powershell.exe',
+      sysBin('powershell.exe'),
       ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script],
       { detached: true, stdio: 'ignore', windowsHide: false }
     )
@@ -581,7 +604,7 @@ export function clearDiscordCache(): DiscordCacheResult {
     if (!existsSync(root)) continue
     result.found = true
     if (processRunning(v.exe)) {
-      run('taskkill.exe', ['/IM', v.exe, '/F'], 8000)
+      run(sysBin('taskkill.exe'), ['/IM', v.exe, '/F'], 8000)
       result.closed.push(v.exe)
     }
     for (const sub of ['Cache', 'Code Cache', 'GPUCache']) {

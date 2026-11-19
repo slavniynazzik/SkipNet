@@ -5,6 +5,15 @@ import path from 'path'
 import AdmZip from 'adm-zip'
 import { BrowserWindow } from 'electron'
 import { zapretBundleDir } from '../utils/dirs'
+import { sysBin } from '../utils/sys-bin'
+import { hasReplacementChar, sameServiceImagePath } from '../utils/service-path'
+import {
+  enumerateOwnedProcesses,
+  isProcessAlive,
+  killOwnedComponent
+} from './process-kill'
+import { parseTasklistCsv, trackProcess, untrackProcess } from './process-ownership'
+import { isWindowsServiceRunning } from './zapret-diagnostics'
 import { getAppConfig } from '../config'
 import { applyGameFilterToBundle, getGameFilterSettings } from './zapret-settings'
 import {
@@ -104,8 +113,8 @@ export async function installZapretArchive(
 
   if (process.platform === 'win32') {
     for (const name of WINDIVERT_SERVICE_NAMES) {
-      try { spawnSync('sc.exe', ['stop', name], { windowsHide: true, timeout: 3000 }) } catch { /* noop */ }
-      try { spawnSync('sc.exe', ['delete', name], { windowsHide: true, timeout: 3000 }) } catch { /* noop */ }
+      try { spawnSync(sysBin('sc.exe'), ['stop', name], { windowsHide: true, timeout: 3000 }) } catch { /* noop */ }
+      try { spawnSync(sysBin('sc.exe'), ['delete', name], { windowsHide: true, timeout: 3000 }) } catch { /* noop */ }
     }
     detectedWinDivertSvc = null
     // Give the SCM a beat to actually release the .sys file handle.
@@ -316,13 +325,25 @@ export function stopZapret(): Promise<void> {
   })
 }
 
-/** Kill any orphan winws.exe instances by image name. */
+/** Kill any orphan `winws.exe` instances we own (never by image name alone). */
 export function killWinws(): Promise<void> {
-  return new Promise((resolve) => {
-    const p = spawn('taskkill.exe', ['/F', '/IM', 'winws.exe'], { windowsHide: true })
-    p.on('exit', () => resolve())
-    p.on('error', () => resolve())
+  return killOwnedComponent('zapret', ['winws.exe']).then((pids) => {
+    if (pids.length > 0) log('info', `stopped winws.exe (pids: ${pids.join(', ')})`)
   })
+}
+
+/**
+ * Find the PID of a winws.exe running from our resources tree and remember it,
+ * so the health loop can probe that exact process instead of the process table.
+ */
+async function adoptOwnedWinwsPid(): Promise<number | null> {
+  try {
+    const owned = await enumerateOwnedProcesses(['winws.exe'])
+    for (const entry of owned) trackProcess(entry.pid, entry.imagePath, 'zapret')
+    return owned[0]?.pid ?? null
+  } catch {
+    return null
+  }
 }
 
 /**
@@ -342,7 +363,7 @@ interface ScQueryResult {
 
 /** Run `sc query` + `sc qc` for a single service name. */
 function scQueryOne(name: string): ScQueryResult {
-  const q = spawnSync('sc.exe', ['query', name], { windowsHide: true, timeout: 2000, encoding: 'utf8' })
+  const q = spawnSync(sysBin('sc.exe'), ['query', name], { windowsHide: true, timeout: 2000, encoding: 'utf8' })
   if (q.status !== 0 || !q.stdout) return { exists: false, state: 'unknown', binaryPath: null }
   // `sc.exe` localises the field label (STATE / СОСТОЯНИЕ / …) but keeps the
   // numeric state and the English RUNNING token. Match the value only so the
@@ -359,7 +380,7 @@ function scQueryOne(name: string): ScQueryResult {
   // `sc qc` exposes BINARY_PATH_NAME — needed so we can detect a stale
   // registration pointing at a previous install directory. The label is
   // localised, so fall back to the first path that ends in `.sys`.
-  const qc = spawnSync('sc.exe', ['qc', name], { windowsHide: true, timeout: 2000, encoding: 'utf8' })
+  const qc = spawnSync(sysBin('sc.exe'), ['qc', name], { windowsHide: true, timeout: 2000, encoding: 'utf8' })
   const pathMatch =
     qc.stdout?.match(/BINARY_PATH_NAME\s*:\s*(.+)$/im) ??
     qc.stdout?.match(/:\s*([A-Za-z]:\\.*?\.sys)\s*$/im)
@@ -422,13 +443,23 @@ export function ensureWinDivertReady(): void {
   // Stale-path detection: the service points at a .sys that no longer
   // exists (old install folder was wiped). Wipe the registration so
   // winws.exe can re-create it at the current path.
-  if (expectedSys && svc.info.binaryPath) {
-    const registered = svc.info.binaryPath.replace(/^\\\?\?\\/, '').toLowerCase()
-    const expected = expectedSys.toLowerCase()
-    if (!existsSync(svc.info.binaryPath.replace(/^\\\?\?\\/, '')) || registered !== expected) {
+  //
+  // L1: compare only the file name, not the full path. `sc qc` is decoded with
+  // the console OEM code page; on a Cyrillic install path the output contains
+  // U+FFFD and never matches. Treating that as "stale" made us run
+  // `sc stop` + `sc delete` and rebuild WinDivert on every single start. A
+  // lossy path is *unknown*, so keep the registration.
+  if (expectedSys && svc.info.binaryPath && hasReplacementChar(svc.info.binaryPath)) {
+    log(
+      'warn',
+      'WinDivert service path could not be decoded (OEM code page) — keeping the registration'
+    )
+  } else if (expectedSys && svc.info.binaryPath) {
+    const registered = svc.info.binaryPath.replace(/^\\\?\?\\/, '')
+    if (!sameServiceImagePath(registered, expectedSys) || !existsSync(registered)) {
       log('warn', `WinDivert service points at stale path: ${svc.info.binaryPath}; re-registering`)
-      spawnSync('sc.exe', ['stop', svc.name], { windowsHide: true, timeout: 2000 })
-      spawnSync('sc.exe', ['delete', svc.name], { windowsHide: true, timeout: 2000 })
+      spawnSync(sysBin('sc.exe'), ['stop', svc.name], { windowsHide: true, timeout: 2000 })
+      spawnSync(sysBin('sc.exe'), ['delete', svc.name], { windowsHide: true, timeout: 2000 })
       detectedWinDivertSvc = null
       return
     }
@@ -438,7 +469,7 @@ export function ensureWinDivertReady(): void {
   // driver is live BEFORE winws.exe tries to use it.
   if (svc.info.state !== 'running') {
     log('info', `starting WinDivert service (${svc.name}, was ${svc.info.state})`)
-    const r = spawnSync('sc.exe', ['start', svc.name], { windowsHide: true, timeout: 5000, encoding: 'utf8' })
+    const r = spawnSync(sysBin('sc.exe'), ['start', svc.name], { windowsHide: true, timeout: 5000, encoding: 'utf8' })
     if (r.status !== 0) {
       // 1056 = service already running — benign race; anything else is a
       // hard failure worth surfacing.
@@ -450,13 +481,29 @@ export function ensureWinDivertReady(): void {
   }
 }
 
-/** Returns true if at least one winws.exe is running. */
-export function isWinwsRunning(): Promise<boolean> {
+/**
+ * Is winws.exe running?
+ *
+ * - with `pid`: liveness of that exact tracked PID (C7) — no image lookup;
+ * - without: process-table probe over the `winws.exe` image name. This is used
+ *   for orphan detection only; it never authorises a kill (a kill enumerates
+ *   paths and checks ownership instead).
+ */
+export function isWinwsRunning(pid?: number): Promise<boolean> {
+  if (pid) return isProcessAlive(pid)
   return new Promise((resolve) => {
-    const p = spawn('tasklist.exe', ['/FI', 'IMAGENAME eq winws.exe', '/NH'], { windowsHide: true })
+    const p = spawn(
+      sysBin('tasklist.exe'),
+      ['/FI', 'IMAGENAME eq winws.exe', '/FO', 'CSV', '/NH'],
+      { windowsHide: true }
+    )
     let out = ''
     p.stdout?.on('data', (b) => { out += b.toString() })
-    p.on('exit', () => resolve(/winws\.exe/i.test(out)))
+    p.on('exit', () =>
+      resolve(
+        parseTasklistCsv(out).some((entry) => entry.imageName.toLowerCase() === 'winws.exe')
+      )
+    )
     p.on('error', () => resolve(false))
   })
 }
@@ -536,6 +583,16 @@ async function startZapretImpl(): Promise<void> {
     throw new Error(msg)
   }
 
+  // S3: BFE (Base Filtering Engine) is a hard dependency of WinDivert — winws
+  // cannot open the driver without it. Without this preflight we spent the full
+  // 7-second health window on a start that could never succeed.
+  if (process.platform === 'win32' && !isWindowsServiceRunning('BFE')) {
+    const msg = 'Служба BFE отключена — WinDivert не сможет перехватывать трафик'
+    setStatus({ state: 'error', lastError: msg, pid: undefined })
+    log('error', msg)
+    throw new Error(msg)
+  }
+
   setStatus({ state: 'starting', startedAt: Date.now(), lastError: undefined })
   log('info', `launching: ${batPath}`)
   stopRequested = false
@@ -563,7 +620,7 @@ async function startZapretImpl(): Promise<void> {
   // .bat files were patched at install time to drop `start /min`, so winws.exe
   // is now a direct child of cmd — no visible window, no taskbar icon, and
   // the whole tree can be killed via taskkill /F /T /PID.
-  const proc = spawn('cmd.exe', ['/c', batPath], {
+  const proc = spawn(sysBin('cmd.exe'), ['/c', batPath], {
     cwd: dir,
     windowsHide: true,
     detached: false,
@@ -575,6 +632,7 @@ async function startZapretImpl(): Promise<void> {
     }
   })
   child = proc
+  trackProcess(proc.pid, sysBin('cmd.exe'), 'zapret')
   proc.stdout?.on('data', (buf) => {
     const s = buf.toString()
     log('info', s.trimEnd())
@@ -587,12 +645,14 @@ async function startZapretImpl(): Promise<void> {
   })
   proc.on('error', (err) => {
     log('error', `child error: ${err.message}`)
+    untrackProcess(proc.pid)
     if (child !== proc) return
     setStatus({ state: 'error', lastError: err.message })
     child = null
   })
   proc.on('exit', (code, signal) => {
     log('info', `zapret exited code=${code} signal=${signal ?? 'none'}`)
+    untrackProcess(proc.pid)
     // A late exit from an older cmd.exe must not overwrite the status of the
     // currently running instance (or null out its `child` reference).
     const isCurrent = child === proc
@@ -613,6 +673,10 @@ async function startZapretImpl(): Promise<void> {
     }
   })
 
+  // C7: probe our own process once per 500 ms. The launcher PID is tracked at
+  // spawn; once winws.exe appears we adopt its PID and check that exact process.
+  // The image-name probe below is a fallback for the first iterations only.
+  let trackedWinwsPid: number | null = null
   const deadline = Date.now() + 7000
   while (Date.now() < deadline) {
     if (!child) return   // cmd already died — exit handler will set error
@@ -637,17 +701,25 @@ async function startZapretImpl(): Promise<void> {
       return
     }
 
-    if (winwsHealth === 'capturing' && await isWinwsRunning()) {
-      setStatus({ state: 'running', pid: child.pid })
-      log('info', `winws.exe is capturing (${Date.now() - (status.startedAt ?? Date.now())}ms)`)
-      return
+    if (winwsHealth === 'capturing') {
+      // Resolve our own winws.exe PID the first time the health signal arrives.
+      if (!trackedWinwsPid) trackedWinwsPid = await adoptOwnedWinwsPid()
+      const alive = trackedWinwsPid
+        ? await isWinwsRunning(trackedWinwsPid)
+        : await isWinwsRunning()
+      if (alive) {
+        setStatus({ state: 'running', pid: trackedWinwsPid ?? child.pid })
+        log('info', `winws.exe is capturing (${Date.now() - (status.startedAt ?? Date.now())}ms)`)
+        return
+      }
     }
 
-    await new Promise((r) => setTimeout(r, 100))
+    await new Promise((r) => setTimeout(r, 500))
   }
 
-  if (await isWinwsRunning() && child) {
-    setStatus({ state: 'running', pid: child.pid })
+  if (child && (trackedWinwsPid ? await isWinwsRunning(trackedWinwsPid) : await isWinwsRunning())) {
+    const pid = trackedWinwsPid ?? (await adoptOwnedWinwsPid()) ?? child.pid
+    setStatus({ state: 'running', pid })
     log('warn', 'winws.exe is up but no health signal seen in 7s — assuming OK')
     return
   }
@@ -669,18 +741,10 @@ async function stopZapretImpl(): Promise<void> {
   stopRequested = true
   setStatus({ state: 'stopping', lastError: undefined })
 
-  // Kill winws.exe by image name — most reliable since it's a single-instance
-  // userland process holding the WinDivert handle.
+  // C7: kill only the PIDs we tracked (launcher cmd tree + adopted winws.exe).
+  // The owned-path fallback inside `killOwnedComponent` covers an orphan left
+  // by a previous crash, but never a winws.exe from another installation.
   await killWinws()
-
-  // Kill the launcher cmd tree too (in case it's still alive waiting).
-  if (child?.pid) {
-    await new Promise<void>((resolve) => {
-      const p = spawn('taskkill.exe', ['/F', '/T', '/PID', String(child!.pid)], { windowsHide: true })
-      p.on('exit', () => resolve())
-      p.on('error', () => resolve())
-    })
-  }
   child = null
   await new Promise((r) => setTimeout(r, 150))
   setStatus({ state: 'stopped', pid: undefined, lastError: undefined })

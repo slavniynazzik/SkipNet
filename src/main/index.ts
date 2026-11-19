@@ -1,6 +1,7 @@
 ﻿import { electronApp, is, optimizer } from '@electron-toolkit/utils'
 import { app, BrowserWindow, dialog, Menu, session, shell } from 'electron'
 import windowStateKeeper from 'electron-window-state'
+import { spawnSync } from 'node:child_process'
 import { join } from 'path'
 import icon from '../../resources/icon.png?asset'
 import { registerIpcMainHandlers, isRelaunchRequested } from './utils/ipc'
@@ -18,6 +19,9 @@ import { isRunningAsAdmin } from './utils/elevation'
 import { consumeResumeZapretAfterUpdate } from './core/app-updater'
 import { initWallpaperProtocol, registerWallpaperScheme } from './core/wallpaper'
 import { migrateLegacyData } from './utils/dirs'
+import { killAllOwnedSync } from './core/process-kill'
+import { shouldQuitOnWindowAllClosed } from './resolve/window-lifecycle'
+import { sysBin } from './utils/sys-bin'
 
 // Lock the userData / cache / log folder names. Must happen before the
 // single-instance lock below: Electron keys the lock off `userData`, so the
@@ -216,6 +220,13 @@ app.whenReady().then(async () => {
 })
 
 app.on('window-all-closed', () => {
+  const cfg = getAppConfigSync()
+  // M4: closing the last window must not quit when the tray icon is the
+  // documented recovery path. Only a real "tray off" app quits here.
+  if (!shouldQuitOnWindowAllClosed(isTrayActive(), !!cfg.disableTray)) {
+    appLog('info', 'Все окна закрыты — приложение остаётся в трее')
+    return
+  }
   app.quit()
 })
 
@@ -253,21 +264,19 @@ let isQuitting = false
 function syncKillChildren(): void {
   if (process.platform !== 'win32') return
   try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { spawnSync } = require('child_process') as typeof import('child_process')
-    const opts = { windowsHide: true, timeout: 2000 } as const
+    const opts = { windowsHide: true, timeout: 4000 } as const
 
-    // 1) Kill known SkipNet child binaries by image name. /T tears down the
-    //    whole process tree, so cfproxy worker pools spawned by TgWsProxy
-    //    and winws.exe sub-children are caught too.
-    spawnSync('taskkill.exe', ['/F', '/IM', 'TgWsProxy_windows.exe', '/T'], opts)
-    spawnSync('taskkill.exe', ['/F', '/IM', 'winws.exe', '/T'], opts)
+    // 1) C7: kill the PIDs we tracked (launcher cmd, winws.exe, TgWsProxy),
+    //    then fall back to processes whose executable lives inside our
+    //    resources tree. Never `taskkill /IM`: that killed other people's
+    //    Zapret/TgWs installations.
+    killAllOwnedSync()
 
     // 2) Stop the WinDivert kernel driver — unloads it from memory so the
     //    `.sys` file is no longer locked on disk. We DO NOT delete the
     //    service registration (see function-level comment for the rationale).
     for (const svc of ['WinDivert', 'windivert', 'WinDivert64', 'windivert64']) {
-      spawnSync('sc.exe', ['stop', svc], opts)
+      spawnSync(sysBin('sc.exe'), ['stop', svc], opts)
     }
   } catch { /* noop */ }
 }

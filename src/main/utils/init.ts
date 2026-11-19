@@ -14,6 +14,7 @@ import { existsSync } from 'fs'
 import { spawn } from 'child_process'
 import path from 'path'
 import { app } from 'electron'
+import { sysBin } from './sys-bin'
 
 // URI schemes used by the project before the SkipNet rebrand. Their handler
 // keys usually point at a different executable, so the Electron helper below
@@ -22,7 +23,7 @@ const LEGACY_SCHEMES = ['slipgate'] as const
 
 function deleteRegistryKey(hive: string, key: string): void {
   try {
-    const p = spawn('reg.exe', ['delete', `${hive}\\${key}`, '/f'], {
+    const p = spawn(sysBin('reg.exe'), ['delete', `${hive}\\${key}`, '/f'], {
       windowsHide: true,
       stdio: 'ignore'
     })

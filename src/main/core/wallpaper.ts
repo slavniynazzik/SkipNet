@@ -25,6 +25,7 @@ import path from 'node:path'
 import os from 'node:os'
 import { execFile } from 'node:child_process'
 import { BrowserWindow, dialog, protocol, shell } from 'electron'
+import { sysBin } from '../utils/sys-bin'
 
 const WALLPAPER_ENGINE_APP_ID = '431960'
 const MEDIA_SCHEME = 'skipnet-media'
@@ -202,7 +203,7 @@ function regQuery(key: string, value: string): Promise<string | null> {
     // `reg.exe` used to be a spawnSync here: a Steam scan then froze the main
     // process for as long as the registry answered (CA10).
     execFile(
-      'reg.exe',
+      sysBin('reg.exe'),
       ['query', key, '/v', value],
       { windowsHide: true, timeout: 5000, encoding: 'utf8' },
       (error, stdout, stderr) => {

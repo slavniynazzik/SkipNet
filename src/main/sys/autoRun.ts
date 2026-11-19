@@ -5,6 +5,7 @@ import { randomUUID } from 'node:crypto'
 import { app } from 'electron'
 import { is } from '@electron-toolkit/utils'
 import { exePath } from '../utils/dirs'
+import { sysBin } from '../utils/sys-bin'
 
 const TASK_NAME = 'SkipNetAutoStart'
 // Task/Run names used before the rebrand. Removed on every enable/disable so
@@ -69,7 +70,7 @@ function clearLegacyRunEntry(): void {
     for (const value of LEGACY_RUN_VALUES) {
       try {
         const p = spawn(
-          'reg.exe',
+          sysBin('reg.exe'),
           [
             'delete',
             `${hive}\\Software\\Microsoft\\Windows\\CurrentVersion\\Run`,
@@ -89,7 +90,7 @@ function clearLegacyRunEntry(): void {
 function runSchtasks(args: string[]): Promise<{ code: number; out: string }> {
   return new Promise((resolve) => {
     let out = ''
-    const p = spawn('schtasks.exe', args, { windowsHide: true })
+    const p = spawn(sysBin('schtasks.exe'), args, { windowsHide: true })
     p.stdout?.on('data', (b) => { out += b.toString() })
     p.stderr?.on('data', (b) => { out += b.toString() })
     p.on('exit', (code) => resolve({ code: code ?? 1, out }))

@@ -1,6 +1,5 @@
 import { existsSync, mkdirSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'fs'
 import path from 'path'
-import { spawn } from 'child_process'
 import { randomUUID } from 'crypto'
 import { tgwsBinaryPath } from '../utils/dirs'
 import { getAppConfig, patchAppConfig } from '../config'
@@ -24,6 +23,7 @@ import {
 } from '../utils/github'
 import { assertExpectedReleaseTag, verifyAsset } from './update-integrity'
 import { stopTgws, getTgwsStatus } from './tgws'
+import { killOwnedComponent } from './process-kill'
 
 // Primary: SkipNet-owned CLI build. Fallback: the known-good headless CLI
 // mirror used before the rebrand, so component updates keep working until the
@@ -197,17 +197,16 @@ export async function checkTgwsUpdate(force = false): Promise<TgwsUpdateInfo> {
   return info
 }
 
-// Best-effort kill of any leftover TgWsProxy_windows.exe so we can overwrite
-// the binary on Windows (where a running .exe holds an exclusive write lock).
+// Best-effort stop of our own TgWsProxy so we can overwrite the binary on
+// Windows (where a running .exe holds an exclusive write lock). C7: only the
+// tracked PID or a binary inside our resources tree — never `/IM`.
 async function killStaleTgwsBinary(): Promise<void> {
   if (process.platform !== 'win32') return
-  await new Promise<void>((resolve) => {
-    const p = spawn('taskkill.exe', ['/F', '/IM', 'TgWsProxy_windows.exe', '/T'], {
-      windowsHide: true
-    })
-    p.on('exit', () => resolve())
-    p.on('error', () => resolve())
-  })
+  try {
+    await killOwnedComponent('tgws', ['TgWsProxy_windows.exe'])
+  } catch {
+    /* best-effort — the write below will surface a hard lock */
+  }
   // Give the OS a beat to release the file lock.
   await new Promise((r) => setTimeout(r, 300))
 }

@@ -22,6 +22,9 @@ import { randomUUID } from 'crypto'
 import path from 'path'
 import { app, BrowserWindow } from 'electron'
 import { dataDir, zapretBundleDir } from '../utils/dirs'
+import { sysBin } from '../utils/sys-bin'
+import { taskkillTree } from './process-kill'
+import { trackProcess, untrackProcess } from './process-ownership'
 import {
   ensureWinDivertReady,
   getZapretStatus,
@@ -225,11 +228,8 @@ async function probeAll(signal?: AbortSignal): Promise<ProbeResult[]> {
 
 function killChildTree(pid: number | undefined): Promise<void> {
   if (!pid) return Promise.resolve()
-  return new Promise<void>((r) => {
-    const p = spawn('taskkill.exe', ['/F', '/T', '/PID', String(pid)], { windowsHide: true })
-    p.on('exit', () => r())
-    p.on('error', () => r())
-  })
+  untrackProcess(pid)
+  return taskkillTree(pid).then(() => undefined)
 }
 
 /** The parts of a `ChildProcess` the sweep actually uses (fake-able in tests). */
@@ -260,7 +260,7 @@ export interface StrategyTesterDeps {
 
 function spawnStrategy(batPath: string): ChildProcess {
   const dir = zapretBundleDir()
-  const c = spawn('cmd.exe', ['/c', batPath], {
+  const c = spawn(sysBin('cmd.exe'), ['/c', batPath], {
     cwd: dir,
     windowsHide: true,
     detached: false,
@@ -271,6 +271,9 @@ function spawnStrategy(batPath: string): ChildProcess {
       NO_UPDATE_CHECK: '1'
     }
   })
+  // Track it: a start/stop that pre-empts the sweep kills tracked PIDs only.
+  trackProcess(c.pid, sysBin('cmd.exe'), 'zapret')
+  c.on('exit', () => untrackProcess(c.pid))
   // Drain stdio so the child process buffer doesn't fill up and stall
   // winws.exe — we don't care about test-time logs in main's logs UI.
   c.stdout?.on('data', () => void 0)

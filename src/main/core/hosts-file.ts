@@ -25,19 +25,20 @@ import os from 'node:os'
 import path from 'node:path'
 import { execFile } from 'node:child_process'
 import { psQuote, runPowerShellElevated } from '../utils/elevated'
+import { sysBin, windowsRoot } from '../utils/sys-bin'
 
 const BLOCK_START = '# --- SkipNet hosts editor BEGIN ---'
 const BLOCK_END = '# --- SkipNet hosts editor END ---'
 
-function windowsRoot(): string {
-  const raw = (process.env.SystemRoot || process.env.windir || 'C:\\Windows').replace(
-    /[\\/]+$/,
-    ''
-  )
-  // Do not let an inherited environment variable redirect a privileged write
-  // to an arbitrary directory.
-  return /^[a-z]:\\(?:Windows|WINNT)$/i.test(raw) ? raw : 'C:\\Windows'
-}
+/**
+ * UTF-16 hosts files are unreadable to the latin1 round-trip this module uses
+ * (and to winws.exe / Windows itself). Saving one silently corrupts every
+ * managed entry, so mutations refuse to proceed instead of writing mojibake
+ * back into the file (H6).
+ */
+export const HOSTS_UTF16_ERROR =
+  'Файл hosts сохранён в кодировке UTF-16. Откройте его в Блокноте и сохраните ' +
+  'как ANSI или UTF-8 (без BOM), затем повторите попытку.'
 
 /**
  * Test seam: the unit suite must never read or write the real system hosts
@@ -54,10 +55,23 @@ export function windowsHostsPath(): string {
   return hostsPathOverride ?? path.join(windowsRoot(), 'System32', 'drivers', 'etc', 'hosts')
 }
 
+/** Decode hosts bytes, rejecting a UTF-16 BOM with a user-facing error (H6). */
+export function decodeHostsBytes(buf: Buffer): string {
+  if (buf.length >= 2) {
+    const first = buf[0]
+    const second = buf[1]
+    // UTF-16LE BOM = FF FE, UTF-16BE BOM = FE FF.
+    if ((first === 0xff && second === 0xfe) || (first === 0xfe && second === 0xff)) {
+      throw new Error(HOSTS_UTF16_ERROR)
+    }
+  }
+  return buf.toString('latin1')
+}
+
 /** Read the hosts file byte-for-byte (latin1 round-trips arbitrary bytes). */
 export function readHostsRaw(): string {
   try {
-    return readFileSync(windowsHostsPath()).toString('latin1')
+    return decodeHostsBytes(readFileSync(windowsHostsPath()))
   } catch {
     return ''
   }
@@ -71,7 +85,7 @@ export function readHostsRaw(): string {
 export function readHostsRawStrict(): string {
   const target = windowsHostsPath()
   if (!existsSync(target)) return ''
-  return readFileSync(target).toString('latin1')
+  return decodeHostsBytes(readFileSync(target))
 }
 
 export interface LenientHostsRead {
@@ -93,7 +107,7 @@ export function readHostsRawLenient(): LenientHostsRead {
   const target = windowsHostsPath()
   try {
     if (!existsSync(target)) return { content: '', ok: true }
-    return { content: readFileSync(target).toString('latin1'), ok: true }
+    return { content: decodeHostsBytes(readFileSync(target)), ok: true }
   } catch (e) {
     const code = (e as NodeJS.ErrnoException)?.code
     if (code === 'ENOENT') return { content: '', ok: true }
@@ -306,7 +320,7 @@ export interface DnsFlushResult {
  */
 export function flushDns(): Promise<DnsFlushResult> {
   return new Promise((resolve) => {
-    const target = path.join(windowsRoot(), 'System32', 'ipconfig.exe')
+    const target = sysBin('ipconfig.exe')
     execFile(
       target,
       ['/flushdns'],
