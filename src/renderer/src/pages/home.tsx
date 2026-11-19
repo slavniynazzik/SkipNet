@@ -108,6 +108,8 @@ const PowerToggle: React.FC<PowerToggleProps> = ({
         disabled={loading || disabled}
         onClick={handleClick}
         title={disabled ? disabledReason : undefined}
+        aria-label={`${label}: ${isSelected ? 'выключить' : 'включить'}`}
+        aria-pressed={isSelected}
         className={`relative group transition-transform active:scale-95 cursor-pointer disabled:cursor-not-allowed ${
           disabled ? 'opacity-60' : ''
         }`}
@@ -205,6 +207,7 @@ const UpdateNotice: React.FC<UpdateNoticeProps> = ({ title, subtitle, onDetails,
         className="size-8"
         onClick={onDismiss}
         title="Скрыть"
+        aria-label="Скрыть уведомление"
       >
         <X className="h-3.5 w-3.5" />
       </Button>

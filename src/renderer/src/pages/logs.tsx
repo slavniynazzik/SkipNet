@@ -40,12 +40,13 @@ const Logs: React.FC = () => {
   }, [logs, filter, sourceFilter])
 
   const toggleTrace = useCallback(() => {
-    setTrace((prev) => {
-      const next = !prev
-      traceRef.current = next
-      if (next) setLogs([...useLogsStore.getState().logs])
-      return next
-    })
+    // Compute the next value outside the updater: `setState` updaters must stay
+    // pure (React may call them twice in StrictMode), so the store read and the
+    // sibling state write happen here, once.
+    const next = !traceRef.current
+    traceRef.current = next
+    setTrace(next)
+    if (next) setLogs([...useLogsStore.getState().logs])
   }, [])
 
   useEffect(() => {
@@ -105,6 +106,8 @@ const Logs: React.FC = () => {
           className={cn('p-0', trace && 'bg-primary text-primary-foreground')}
           variant={trace ? 'default' : 'outline'}
           title="Следовать за хвостом"
+          aria-label="Следовать за хвостом"
+          aria-pressed={trace}
           onClick={toggleTrace}
         >
           <MapPin className="size-4" />

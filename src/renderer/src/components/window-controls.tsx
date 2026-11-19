@@ -77,6 +77,7 @@ const WindowControls: React.FC = () => {
       onClick={handleClose}
       onPointerLeave={clearSuppressed}
       onPointerMove={clearSuppressed}
+      aria-label="Закрыть окно"
     >
       <svg viewBox="0 0 10 10" fill="none">
         <path
@@ -96,6 +97,7 @@ const WindowControls: React.FC = () => {
       onClick={handleMinimize}
       onPointerLeave={clearSuppressed}
       onPointerMove={clearSuppressed}
+      aria-label="Свернуть окно"
     >
       <svg viewBox="0 0 10 10" fill="none">
         <path d="M1.5 5H8.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
@@ -104,7 +106,12 @@ const WindowControls: React.FC = () => {
   )
 
   const maximizeBtn = (
-    <button key="maximize" className="wc-btn wc-maximize" onClick={handleMaximize}>
+    <button
+      key="maximize"
+      className="wc-btn wc-maximize"
+      onClick={handleMaximize}
+      aria-label={isMaximized ? 'Восстановить окно' : 'Развернуть окно'}
+    >
       {isMaximized ? (
         <svg viewBox="0 0 10 10" fill="none">
           <path

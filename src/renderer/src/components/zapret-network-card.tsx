@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useId, useState } from 'react'
 import { toast } from 'sonner'
 import { ChevronDown, ChevronRight, Filter } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@renderer/components/ui/card'
@@ -261,23 +261,29 @@ const RangeField: React.FC<{
   disabled?: boolean
   onChange: (value: string) => void
   onApply: () => void
-}> = ({ label, value, disabled, onChange, onApply }) => (
-  <div>
-    <label className="mb-1 block text-[11px] text-muted-foreground">{label}</label>
-    <div className="flex items-center gap-1.5">
-      <Input
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        disabled={disabled}
-        spellCheck={false}
-        className="h-8 font-mono text-xs"
-        aria-label={label}
-      />
-      <Button size="sm" variant="outline" onClick={onApply} disabled={disabled}>
-        ОК
-      </Button>
+}> = ({ label, value, disabled, onChange, onApply }) => {
+  const id = useId()
+  return (
+    <div>
+      <label htmlFor={id} className="mb-1 block text-[11px] text-muted-foreground">
+        {label}
+      </label>
+      <div className="flex items-center gap-1.5">
+        <Input
+          id={id}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          disabled={disabled}
+          spellCheck={false}
+          className="h-8 font-mono text-xs"
+          aria-label={label}
+        />
+        <Button size="sm" variant="outline" onClick={onApply} disabled={disabled}>
+          ОК
+        </Button>
+      </div>
     </div>
-  </div>
-)
+  )
+}
 
 export default ZapretNetworkCard

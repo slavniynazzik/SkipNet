@@ -1,9 +1,8 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { toast } from 'sonner'
 import {
   AlertTriangle,
-  CheckCircle2,
   FileText,
   Globe,
   Info,
@@ -19,12 +18,9 @@ import { Card, CardContent, CardHeader, CardTitle } from '@renderer/components/u
 import { Button } from '@renderer/components/ui/button'
 import { Input } from '@renderer/components/ui/input'
 import { Switch } from '@renderer/components/ui/switch'
-import HostsServiceIcon from '@renderer/components/hosts-service-icon'
+import HostsServiceCard from '@renderer/components/hosts-service-card'
 import { cn } from '@renderer/lib/utils'
-import {
-  defaultProfileFor,
-  profileOptionsFor
-} from '@renderer/lib/hosts-profile'
+import { matchesService } from '@renderer/lib/hosts-search'
 import {
   hostsApply,
   hostsDisableAll,
@@ -64,16 +60,6 @@ function formatWhen(value?: string): string {
     hour: '2-digit',
     minute: '2-digit'
   })
-}
-
-function domainCount(service: HostsService): number {
-  return service.kind === 'hosts'
-    ? (service.entries?.length ?? 0)
-    : (service.domains?.length ?? 0)
-}
-
-function profileName(profiles: HostsDnsProfile[], id: string): string {
-  return profiles.find((profile) => profile.id === id)?.name ?? id
 }
 
 const Hosts: React.FC = () => {
@@ -121,13 +107,33 @@ const Hosts: React.FC = () => {
   const uiBusy = busyAction !== null || busyService !== null
   const controlsLocked = legacyPresent || legacySkipNet || uiBusy
 
-  const accept = (result: HostsOperationResult, success?: string): void => {
-    setOverview(result)
+  const accept = useCallback((result: HostsOperationResult, success?: string): void => {
+    // Mutating RPCs return the whole ~226 KB catalog. Keep the catalog we
+    // already hold (same object reference → memoised cards skip) and merge
+    // only what actually changed in this operation.
+    setOverview((prev) =>
+      prev
+        ? {
+            ...prev,
+            state: result.state,
+            status: result.status,
+            recovery: result.recovery
+          }
+        : result
+    )
     setError(null)
     toast.success(success ?? result.message, {
       description: result.warnings.length > 0 ? result.warnings.slice(0, 3).join(' · ') : undefined
     })
-  }
+  }, [])
+
+  // Stable identities for the memoised service cards: a card must not
+  // re-render just because `busyService`/`controlsLocked` moved, so the
+  // handler reads the latest value from refs instead of closing over state.
+  const busyServiceRef = useRef(busyService)
+  busyServiceRef.current = busyService
+  const controlsLockedRef = useRef(controlsLocked)
+  controlsLockedRef.current = controlsLocked
 
   const runAction = async (
     id: string,
@@ -147,20 +153,23 @@ const Hosts: React.FC = () => {
     }
   }
 
-  const setService = async (service: HostsService, value: HostsSelection): Promise<void> => {
-    if (busyService || controlsLocked) return
-    setBusyService(service.id)
-    try {
-      accept(await hostsSetService(service.id, value))
-    } catch (e) {
-      toast.error('Не удалось изменить сервис', {
-        description: e instanceof Error ? e.message : String(e)
-      })
-      await reload()
-    } finally {
-      setBusyService(null)
-    }
-  }
+  const setService = useCallback(
+    async (service: HostsService, value: HostsSelection): Promise<void> => {
+      if (busyServiceRef.current || controlsLockedRef.current) return
+      setBusyService(service.id)
+      try {
+        accept(await hostsSetService(service.id, value))
+      } catch (e) {
+        toast.error('Не удалось изменить сервис', {
+          description: e instanceof Error ? e.message : String(e)
+        })
+        await reload()
+      } finally {
+        setBusyService(null)
+      }
+    },
+    [accept, reload]
+  )
 
   const openFile = (): void => {
     void hostsOpenFile().catch((e: unknown) => {
@@ -232,18 +241,9 @@ const Hosts: React.FC = () => {
     void runAction('import', hostsImportLegacy)
   }
 
-  const query = search.trim().toLowerCase()
-  const matches = (service: HostsService): boolean => {
-    if (!query) return true
-    if (service.name.toLowerCase().includes(query) || service.id.toLowerCase().includes(query)) {
-      return true
-    }
-    const hostnames =
-      service.kind === 'hosts'
-        ? (service.entries ?? []).map((entry) => entry.hostname)
-        : (service.domains ?? []).map((domain) => domain.hostname)
-    return hostnames.some((hostname) => hostname.includes(query))
-  }
+  // Typing stays responsive: the expensive filter runs against a deferred
+  // value, so the input updates immediately while the grid catches up.
+  const deferredQuery = useDeferredValue(search)
 
   const enabledCount = status?.enabledServices ?? 0
   const managedLines = status?.managedLines ?? 0
@@ -269,10 +269,10 @@ const Hosts: React.FC = () => {
         ...section,
         total: all.length,
         enabled: all.filter((service) => isEnabled(state?.selection[service.id])).length,
-        services: all.filter(matches)
+        services: all.filter((service) => matchesService(service, deferredQuery))
       }
     })
-  }, [catalog, state, query])
+  }, [catalog, state, deferredQuery])
 
   return (
     <BasePage title="Редактор hosts">
@@ -602,96 +602,18 @@ const Hosts: React.FC = () => {
                   <p className="text-sm text-muted-foreground">Ничего не найдено.</p>
                 ) : (
                   <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-                    {section.services.map((service) => {
-                      const selection = state?.selection[service.id]
-                      const on = isEnabled(selection)
-                      const currentProfile =
-                        service.kind === 'dns'
-                          ? on && typeof selection === 'string' && selection !== 'hosts'
-                            ? selection
-                            : defaultProfileFor(service, profiles, state?.defaultDnsProfile)
-                          : 'hosts'
-                      const busy = busyService === service.id
-                      const disabled = controlsLocked || busy
-                      // The current value is always part of the list (stored
-                      // profile without answers, or 'off'), otherwise the
-                      // browser would display the first option instead of the
-                      // real selection (R21).
-                      const profileOptions = profileOptionsFor(
-                        service,
-                        profiles,
-                        currentProfile
-                      )
-                      return (
-                        <div
-                          key={service.id}
-                          className={cn(
-                            'flex items-start gap-3 rounded-xl border p-3 transition',
-                            on
-                              ? 'border-primary/50 bg-primary/5'
-                              : 'border-stroke bg-card/40',
-                            busy && 'opacity-60'
-                          )}
-                        >
-                          <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-muted/60">
-                            <HostsServiceIcon service={service} className="size-5" />
-                          </div>
-                          <div className="min-w-0 flex-1">
-                            <div className="flex items-center gap-1.5">
-                              <span className="truncate text-sm font-medium">{service.name}</span>
-                              {on && (
-                                <CheckCircle2 className="size-3.5 shrink-0 text-emerald-400" />
-                              )}
-                            </div>
-                            <div className="text-[11px] text-muted-foreground">
-                              {domainCount(service)} доменов
-                              {on && service.kind === 'dns'
-                                ? ` · ${profileName(profiles, currentProfile)}`
-                                : ''}
-                            </div>
-                            {service.kind === 'dns' ? (
-                              <select
-                                value={currentProfile}
-                                onChange={(event) => {
-                                  void setService(service, event.target.value)
-                                }}
-                                disabled={disabled || !on}
-                                title={on ? 'DNS-профиль' : 'Сначала включите сервис'}
-                                className={cn(
-                                  'mt-1 h-7 max-w-full rounded-md border border-stroke bg-card/60 px-1.5 text-[11px] text-muted-foreground',
-                                  'outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-stroke',
-                                  !on && 'opacity-60'
-                                )}
-                              >
-                                {profileOptions.map(
-                                  (profile) => (
-                                    <option key={profile.id} value={profile.id}>
-                                      {profile.name}
-                                    </option>
-                                  )
-                                )}
-                              </select>
-                            ) : (
-                              <span className="mt-1 inline-flex rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
-                                Напрямую
-                              </span>
-                            )}
-                          </div>
-                          <Switch
-                            checked={on}
-                            disabled={disabled}
-                            onCheckedChange={(checked) => {
-                              const value: HostsSelection = checked
-                                ? service.kind === 'hosts'
-                                  ? 'hosts'
-                                  : defaultProfileFor(service, profiles, state?.defaultDnsProfile)
-                                : 'off'
-                              void setService(service, value)
-                            }}
-                          />
-                        </div>
-                      )
-                    })}
+                    {section.services.map((service) => (
+                      <HostsServiceCard
+                        key={service.id}
+                        service={service}
+                        selection={state?.selection[service.id]}
+                        profiles={profiles}
+                        defaultDnsProfile={state?.defaultDnsProfile}
+                        busy={busyService === service.id}
+                        disabled={controlsLocked || busyService === service.id}
+                        onSetService={setService}
+                      />
+                    ))}
                   </div>
                 )}
               </CardContent>
@@ -706,7 +628,7 @@ const Hosts: React.FC = () => {
           <CardContent>
             <div className="flex items-center justify-between gap-3">
               <div className="min-w-0">
-                <div className="flex items-center gap-2 text-sm">
+                <div id="hosts-adobe-block-label" className="flex items-center gap-2 text-sm">
                   <ShieldOff className="h-4 w-4 text-muted-foreground" />
                   Блокировать активацию Adobe
                 </div>
@@ -718,6 +640,7 @@ const Hosts: React.FC = () => {
               <Switch
                 checked={state?.adobeBlock ?? false}
                 disabled={controlsLocked || !state}
+                aria-labelledby="hosts-adobe-block-label"
                 onCheckedChange={(checked) => {
                   void runAction('adobe', () => hostsSetAdobe(checked))
                 }}

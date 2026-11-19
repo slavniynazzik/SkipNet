@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useId, useState } from 'react'
 import { toast } from 'sonner'
 import { ChevronDown, ChevronRight, Layers } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@renderer/components/ui/card'
@@ -141,43 +141,49 @@ const FakeRow: React.FC<{
   busy?: boolean
   onChange: (value: string) => void
   onApply: () => void
-}> = ({ label, current, value, fakes, disabled, busy, onChange, onApply }) => (
-  <div className="flex flex-wrap items-end gap-2">
-    <div className="min-w-0 flex-1">
-      <div className="mb-1 flex items-center justify-between gap-2">
-        <label className="text-[11px] text-muted-foreground">{label}</label>
-        <span className="truncate text-[10px] font-mono text-muted-foreground">
-          сейчас: {current ?? 'не определён'}
-        </span>
+}> = ({ label, current, value, fakes, disabled, busy, onChange, onApply }) => {
+  const id = useId()
+  return (
+    <div className="flex flex-wrap items-end gap-2">
+      <div className="min-w-0 flex-1">
+        <div className="mb-1 flex items-center justify-between gap-2">
+          <label htmlFor={id} className="text-[11px] text-muted-foreground">
+            {label}
+          </label>
+          <span className="truncate text-[10px] font-mono text-muted-foreground">
+            сейчас: {current ?? 'не определён'}
+          </span>
+        </div>
+        <select
+          id={id}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          disabled={disabled}
+          aria-label={label}
+          className={cn(
+            'h-9 w-full min-w-0 rounded-xl border border-stroke bg-card/50 px-3 text-sm',
+            'outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-stroke',
+            disabled && 'cursor-not-allowed opacity-50'
+          )}
+        >
+          {fakes.length === 0 && <option value="">Нет файлов</option>}
+          {fakes.map((name) => (
+            <option key={name} value={name}>
+              {name}
+            </option>
+          ))}
+        </select>
       </div>
-      <select
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        disabled={disabled}
-        aria-label={label}
-        className={cn(
-          'h-9 w-full min-w-0 rounded-xl border border-stroke bg-card/50 px-3 text-sm',
-          'outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-stroke',
-          disabled && 'cursor-not-allowed opacity-50'
-        )}
+      <Button
+        size="sm"
+        variant="outline"
+        onClick={onApply}
+        disabled={disabled || !value || value === current}
       >
-        {fakes.length === 0 && <option value="">Нет файлов</option>}
-        {fakes.map((name) => (
-          <option key={name} value={name}>
-            {name}
-          </option>
-        ))}
-      </select>
+        {busy ? 'Замена…' : 'Заменить'}
+      </Button>
     </div>
-    <Button
-      size="sm"
-      variant="outline"
-      onClick={onApply}
-      disabled={disabled || !value || value === current}
-    >
-      {busy ? 'Замена…' : 'Заменить'}
-    </Button>
-  </div>
-)
+  )
+}
 
 export default ZapretFakesCard

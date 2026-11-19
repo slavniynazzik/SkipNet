@@ -127,12 +127,16 @@ const WallpaperCard: React.FC = () => {
       <CardContent className="space-y-4">
         <div className="flex items-center justify-between gap-3">
           <div className="flex flex-col">
-            <span className="text-sm">Свои обои</span>
+            <span id="wallpaper-enabled-label" className="text-sm">
+              Свои обои
+            </span>
             <span className="text-xs text-muted-foreground">
               Заменяют фоновую карту. Видео проигрывается без звука в цикле.
             </span>
           </div>
           <Switch
+            id="wallpaper-enabled"
+            aria-labelledby="wallpaper-enabled-label"
             checked={wallpaper.enabled}
             onCheckedChange={(enabled) => { void patch({ enabled }) }}
           />

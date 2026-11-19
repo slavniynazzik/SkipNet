@@ -2,7 +2,7 @@ import { Button } from '@renderer/components/ui/button'
 import { platform } from '@renderer/utils/init'
 import WindowControls from '@renderer/components/window-controls'
 import { cn } from '@renderer/lib/utils'
-import React, { forwardRef, useImperativeHandle, useRef } from 'react'
+import React from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { ChevronLeft } from 'lucide-react'
 
@@ -27,18 +27,13 @@ interface Props {
   showBackButton?: boolean
 }
 
-const BasePage = forwardRef<HTMLDivElement, Props>((props, ref) => {
+const BasePage: React.FC<Props> = (props) => {
   const location = useLocation()
   const navigate = useNavigate()
   const isSubPage = !sidebarPaths.has(location.pathname)
 
-  const contentRef = useRef<HTMLDivElement>(null)
-  useImperativeHandle(ref, () => {
-    return contentRef.current as HTMLDivElement
-  })
-
   return (
-    <div ref={contentRef} className="w-full h-full">
+    <div className="w-full h-full">
       <div className="sticky top-0 z-40 h-14.25 w-full">
         <div className="app-drag px-2 pt-3 pb-2 flex justify-between h-14.25">
           <div className="title h-full text-lg leading-8 flex items-center gap-1">
@@ -47,6 +42,7 @@ const BasePage = forwardRef<HTMLDivElement, Props>((props, ref) => {
                 size="icon-sm"
                 variant="ghost"
                 className="app-nodrag"
+                aria-label="Назад"
                 onClick={() => navigate(-1)}
               >
                 <ChevronLeft className="size-5" />
@@ -70,7 +66,6 @@ const BasePage = forwardRef<HTMLDivElement, Props>((props, ref) => {
       </div>
     </div>
   )
-})
+}
 
-BasePage.displayName = 'BasePage'
 export default BasePage

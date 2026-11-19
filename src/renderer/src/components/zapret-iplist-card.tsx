@@ -83,9 +83,15 @@ const ZapretIpListCard: React.FC<Props> = ({ disabled = false, disabledReason, r
     const tId = toast.loading(`Скачиваем ${label} из GitHub…`)
     try {
       const result = await zapretUpdateLists(scope)
-      const [snap, lists] = await Promise.all([zapretGetIpList(), zapretGetListsStatus()])
-      setSnapshot(snap)
-      setListsStatus(lists ?? result.status)
+      // The update itself succeeded. Reading the new snapshot is a separate
+      // concern: a failed read must not turn a successful download into
+      // "Не удалось обновить" (R23).
+      const [snapResult, listsResult] = await Promise.allSettled([
+        zapretGetIpList(),
+        zapretGetListsStatus()
+      ])
+      if (snapResult.status === 'fulfilled') setSnapshot(snapResult.value)
+      setListsStatus(listsResult.status === 'fulfilled' ? listsResult.value : result.status)
       toast.success(`Обновлено: ${label}`, {
         id: tId,
         description: `${result.updated.length} файл(ов), ${result.totalEntries} записей. Перезапустите Zapret, чтобы применить изменения.`,

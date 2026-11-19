@@ -12,6 +12,13 @@ interface ZapretTestStore {
   progress: StrategyTestProgress | null
   report: StrategyTestReport | null
   isRunning: boolean
+  /**
+   * True once the initial `zapret:getStrategyTestResults` /
+   * `zapret:isStrategyTestRunning` pair has settled. The Zapret page waits for
+   * this before its auto-test so a stale "no report" snapshot cannot trigger
+   * a second sweep while hydration is still in flight (R22).
+   */
+  hydrated: boolean
   set: (patch: Partial<ZapretTestStore>) => void
 }
 
@@ -19,6 +26,7 @@ export const useZapretTestStore = create<ZapretTestStore>((set) => ({
   progress: null,
   report: null,
   isRunning: false,
+  hydrated: false,
   set: (patch) => set(patch)
 }))
 
@@ -88,6 +96,8 @@ export const attachZapretTestStore = (): (() => void) => {
       isRunning: running,
       progress: running ? { phase: 'testing' } : null
     })
+  }).finally(() => {
+    useZapretTestStore.getState().set({ hydrated: true })
   })
 
   return off

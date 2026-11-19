@@ -105,6 +105,7 @@ const SwitcherCard: React.FC<SwitcherCardProps> = ({
           <Switch
             checked={on}
             disabled={locked}
+            aria-label={title}
             onCheckedChange={handleChange}
           />
           {version && (

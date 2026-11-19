@@ -146,30 +146,42 @@ const Settings: React.FC = () => {
         </CardHeader>
         <CardContent className="space-y-3">
           <div className="flex items-center justify-between">
-            <Label className="text-sm">Запускать при входе в Windows</Label>
+            <Label htmlFor="settings-auto-launch" className="text-sm">
+              Запускать при входе в Windows
+            </Label>
             <Switch
+              id="settings-auto-launch"
               checked={appConfig?.autoLaunch ?? false}
               onCheckedChange={(v) => { void patchAppConfig({ autoLaunch: v }) }}
             />
           </div>
           <div className="flex items-center justify-between">
-            <Label className="text-sm">Тихий старт (без окна)</Label>
+            <Label htmlFor="settings-silent-start" className="text-sm">
+              Тихий старт (без окна)
+            </Label>
             <Switch
+              id="settings-silent-start"
               checked={appConfig?.silentStart ?? false}
               onCheckedChange={(v) => { void patchAppConfig({ silentStart: v }) }}
             />
           </div>
           <div className="flex items-center justify-between">
-            <Label className="text-sm">Автозапуск Telegram</Label>
+            <Label htmlFor="settings-tgws-autostart" className="text-sm">
+              Автозапуск Telegram
+            </Label>
             <Switch
+              id="settings-tgws-autostart"
               checked={appConfig?.tgws?.autoStart ?? false}
               disabled={!appConfig?.tgws}
               onCheckedChange={(v) => { void patchAppConfig(tgwsPatch({ autoStart: v })) }}
             />
           </div>
           <div className="flex items-center justify-between">
-            <Label className="text-sm">Автозапуск Zapret</Label>
+            <Label htmlFor="settings-zapret-autostart" className="text-sm">
+              Автозапуск Zapret
+            </Label>
             <Switch
+              id="settings-zapret-autostart"
               checked={appConfig?.zapret?.autoStart ?? false}
               disabled={!appConfig?.zapret}
               onCheckedChange={(v) => { void patchAppConfig(zapretPatch({ autoStart: v })) }}
@@ -185,26 +197,32 @@ const Settings: React.FC = () => {
         <CardContent className="space-y-3">
           <div className="flex items-center justify-between">
             <div className="flex flex-col">
-              <Label className="text-sm">Иконка в трее</Label>
+              <Label htmlFor="settings-tray-icon" className="text-sm">
+                Иконка в трее
+              </Label>
               <span className="text-xs text-muted-foreground">
                 Если выключена — при нажатии на «X» приложение полностью закрывается и
                 завершает работу.
               </span>
             </div>
             <Switch
+              id="settings-tray-icon"
               checked={!(appConfig?.disableTray ?? false)}
               onCheckedChange={(v) => { void patchAppConfig({ disableTray: !v }) }}
             />
           </div>
           <div className="flex items-center justify-between">
             <div className="flex flex-col">
-              <Label className="text-sm">Убрать иконку с панели задач</Label>
+              <Label htmlFor="settings-taskbar-icon" className="text-sm">
+                Убрать иконку с панели задач
+              </Label>
               <span className="text-xs text-muted-foreground">
                 Не применяется, если иконка в трее выключена: в этом случае «X»
                 полностью закрывает приложение.
               </span>
             </div>
             <Switch
+              id="settings-taskbar-icon"
               checked={appConfig?.hideTaskbarIcon ?? false}
               onCheckedChange={(v) => { void patchAppConfig({ hideTaskbarIcon: v }) }}
             />
@@ -219,12 +237,15 @@ const Settings: React.FC = () => {
         <CardContent className="space-y-3">
           <div className="flex items-center justify-between gap-3">
             <div className="flex flex-col">
-              <Label className="text-sm">Проверять обновления автоматически</Label>
+              <Label htmlFor="settings-auto-update" className="text-sm">
+                Проверять обновления автоматически
+              </Label>
               <span className="text-xs text-muted-foreground">
                 Показывает окно обновления SkipNet, когда выходит новая версия.
               </span>
             </div>
             <Switch
+              id="settings-auto-update"
               checked={appConfig?.autoCheckUpdate ?? true}
               onCheckedChange={(v) => { void patchAppConfig({ autoCheckUpdate: v }) }}
             />
@@ -278,8 +299,11 @@ const Settings: React.FC = () => {
         </CardHeader>
         <CardContent className="space-y-3">
           <div className="flex items-center justify-between">
-            <Label className="text-sm">Отключить аппаратное ускорение (нужен перезапуск)</Label>
+            <Label htmlFor="settings-disable-gpu" className="text-sm">
+              Отключить аппаратное ускорение (нужен перезапуск)
+            </Label>
             <Switch
+              id="settings-disable-gpu"
               checked={appConfig?.disableGPU ?? false}
               onCheckedChange={(v) => { void patchAppConfig({ disableGPU: v }) }}
             />

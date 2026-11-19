@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { toast } from 'sonner'
 import { Download, Loader2, Sparkles, FlaskConical, CheckCircle2, XCircle, RefreshCw } from 'lucide-react'
@@ -61,11 +61,20 @@ const Zapret: React.FC = () => {
   const autoTestStartedRef = useRef(false)
   const [cancelling, setCancelling] = useState(false)
 
-  const refreshStrategies = (): void => {
-    zapretListStrategies().then(setStrategies).catch(() => setStrategies([]))
-  }
+  const refreshStrategies = useCallback(async (): Promise<
+    { file: string; title: string; description: string }[]
+  > => {
+    try {
+      const list = await zapretListStrategies()
+      setStrategies(list)
+      return list
+    } catch {
+      setStrategies([])
+      return []
+    }
+  }, [])
 
-  const startTest = (): void => {
+  const startTest = useCallback((): void => {
     if (useZapretTestStore.getState().isRunning) return
     // Optimistically flip isRunning so the UI dims immediately — the
     // first 'starting' IPC tick will arrive within ~100ms and reconcile.
@@ -81,24 +90,26 @@ const Zapret: React.FC = () => {
         progress: { phase: 'error', message: msg }
       })
     })
-  }
-
-  useEffect(() => {
-    refreshStrategies()
-
-    const t = setTimeout(() => {
-      if (autoTestStartedRef.current) return
-      const s = useZapretTestStore.getState()
-      if (s.report || s.isRunning) return
-      autoTestStartedRef.current = true
-      zapretListStrategies()
-        .then((list) => {
-          if (list.length > 0) startTest()
-        })
-        .catch(() => void 0)
-    }, 250)
-    return () => clearTimeout(t)
   }, [])
+
+  // One strategy listing per mount: the auto-test below reuses this state
+  // instead of issuing a second `zapretListStrategies` request.
+  useEffect(() => {
+    void refreshStrategies()
+  }, [refreshStrategies])
+
+  // Auto-test only after the test store finished hydrating, otherwise a
+  // stale "no report yet" snapshot would start a second sweep while the
+  // persisted report is still loading (R22).
+  const testStoreHydrated = useZapretTestStore((s) => s.hydrated)
+  useEffect(() => {
+    if (!testStoreHydrated || autoTestStartedRef.current) return
+    if (strategies.length === 0) return
+    const s = useZapretTestStore.getState()
+    autoTestStartedRef.current = true
+    if (s.report || s.isRunning) return
+    startTest()
+  }, [strategies, startTest, testStoreHydrated])
 
   // Automatic update check honours `zapret.checkUpdates` inside the shared
   // hook. Background errors stay silent: the banner is simply absent.
@@ -123,16 +134,13 @@ const Zapret: React.FC = () => {
       })
       // If the active strategy no longer exists in the new bundle, drop it
       // so the user is forced to pick a fresh one before next start.
-      refreshStrategies()
+      const fresh = await refreshStrategies()
       setBundleRefreshKey((k) => k + 1)
-      if (active) {
-        const fresh = await zapretListStrategies().catch(() => [])
-        if (!fresh.some((s) => s.file === active)) {
-          // Leaf-only patch: the install above just persisted the new
-          // version, so sending a pre-install `zapret` snapshot would roll it
-          // back. A failed clear is already toasted by `patchAppConfig`.
-          await patchAppConfig(zapretPatch({ activeStrategy: undefined }))
-        }
+      if (active && !fresh.some((s) => s.file === active)) {
+        // Leaf-only patch: the install above just persisted the new
+        // version, so sending a pre-install `zapret` snapshot would roll it
+        // back. A failed clear is already toasted by `patchAppConfig`.
+        await patchAppConfig(zapretPatch({ activeStrategy: undefined }))
       }
       // Re-check so the banner disappears immediately; a failed re-check must
       // not turn a successful install into an error toast.

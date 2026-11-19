@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { useLocation, useRoutes } from 'react-router-dom'
 import { toast } from 'sonner'
 import { useTheme } from 'next-themes'
-import './i18n'
+import i18n from './i18n'
 import routes from '@renderer/routes'
 import { useAppConfig } from '@renderer/hooks/use-app-config'
 import { applyTheme, setNativeTheme, wallpaperResolve, type WallpaperState } from '@renderer/utils/ipc'
@@ -69,6 +69,19 @@ const App: React.FC = () => {
       /* noop */
     })
   }, [customTheme])
+
+  // R15: the document language must follow the selected UI language so screen
+  // readers and the spell-checker use the right locale. `i18n.language` is
+  // already resolved from localStorage/system on module init; the listener
+  // keeps it in sync when the user switches language at runtime.
+  useEffect(() => {
+    const applyLang = (language: string): void => {
+      if (language) document.documentElement.lang = language
+    }
+    applyLang(i18n.language)
+    i18n.on('languageChanged', applyLang)
+    return () => i18n.off('languageChanged', applyLang)
+  }, [])
 
   useEffect(() => {
     const handleShowError = (...args: unknown[]): void => {
