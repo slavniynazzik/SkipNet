@@ -115,3 +115,32 @@
 - Все 8 сценариев PASS в admin и non-admin: `[ ] да  [ ] нет`
 - Замечания / ссылки на логи: `________________________________________`
 - Подпись релиз-инженера: `______________________`
+
+## Автоматический renderer smoke (Playwright, только локально)
+
+`pnpm test:e2e` собирает `out/` (`electron-vite build`) и запускает
+`test-e2e/app.spec.ts` через Playwright Electron. Проверяются только
+read-only сценарии рендерера:
+
+- главное окно и редирект на `#/home`;
+- переходы по сайдбару `/hosts`, `/settings`, `/logs`, `/zapret` с проверкой
+  заголовка страницы;
+- отсутствие `pageerror` и `console.error` (allow-list только для известного
+  шума Chromium/DevTools);
+- непустой каталог сервисов на странице hosts (без apply/toggle);
+- наличие переключателей автозапуска и трея в настройках (без кликов).
+
+Изоляция: каждый запуск получает уникальный `--user-data-dir` в `os.tmpdir()`,
+поэтому `%APPDATA%\skipnet` и single-instance lock реального приложения не
+затрагиваются. Тестовый entrypoint `test-e2e/electron-main.cjs` загружает
+настоящий `out/main/index.js`, но отключает только OS-интеграцию вне области
+smoke-теста: регистрацию `skipnet://`/`tg-ws://`, `schtasks`, `reg`,
+`sc start/stop/delete` и `taskkill`. Маркер
+`resources/zapret/utils/check_updates.enabled` также остаётся без изменений.
+Страница hosts читает реальный файл hosts (только чтение, без записи).
+Запускайте из обычной non-admin консоли; UAC не требуется.
+
+Статус CI: **локально**. Job в `.github/workflows/ci.yml` не добавлен:
+стабильность GUI-сессии Electron на GitHub-hosted Windows runner и контекст
+admin на runner'е не проверялись. При падении скриншот и контекст лежат в
+`test-results/e2e/`.

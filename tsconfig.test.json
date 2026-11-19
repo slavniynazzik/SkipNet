@@ -2,9 +2,11 @@
   "extends": "./tsconfig.node.json",
   "include": [
     "test/**/*.ts",
+    "test-e2e/**/*.ts",
     "src/main/**/*.ts",
     "src/shared/**/*.d.ts",
-    "vitest.config.ts"
+    "vitest.config.ts",
+    "playwright.config.ts"
   ],
   "compilerOptions": {
     "composite": false,

@@ -5,6 +5,8 @@ extra
 dist
 out
 coverage
+test-results
+playwright-report
 # Per-version release archive (~190 MB each) — kept locally, published as
 # separate GitHub Releases instead of being committed.
 releases
