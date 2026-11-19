@@ -1,9 +1,15 @@
-import { existsSync, mkdirSync, writeFileSync, renameSync, unlinkSync } from 'fs'
+import { existsSync, mkdirSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'fs'
 import path from 'path'
 import { spawn } from 'child_process'
 import { randomUUID } from 'crypto'
-import { tgwsRuntimeDir } from '../utils/dirs'
+import { tgwsBinaryPath } from '../utils/dirs'
 import { getAppConfig, patchAppConfig } from '../config'
+import {
+  readManifestOrNull,
+  updateManifestEntries,
+  verifyTgwsBinary,
+  writeManifestEntries
+} from './binary-integrity'
 import type { PersistedUpdateCache, UpdateCacheMetadata } from '../utils/update-cache'
 import { loadUpdateCache, saveUpdateCache } from '../utils/update-cache'
 import {
@@ -295,24 +301,59 @@ export async function installTgwsUpdate(
   // name before writing.
   await killStaleTgwsBinary()
 
-  const dir = tgwsRuntimeDir()
+  const dest = tgwsBinaryPath()
+  const dir = path.dirname(dest)
+  const resourcesRoot = path.dirname(dir)
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
-  const dest = path.join(dir, 'TgWsProxy_windows.exe')
+  const relativePath = `${path.basename(dir)}/${path.basename(dest)}`
+
   // Write to a staging file first so a failed write cannot truncate the
-  // working binary that is currently on disk.
+  // working binary that is currently on disk. The old binary is moved aside
+  // (not deleted) until the manifest has been updated and verified.
+  const previousManifest = readManifestOrNull(resourcesRoot)
   const tmp = `${dest}.${randomUUID()}.tmp`
+  const backup = `${dest}.${randomUUID()}.previous`
+  const hadPrevious = existsSync(dest)
+  let swapped = false
+
   try {
     writeFileSync(tmp, buf, { flag: 'wx' })
-    renameSync(tmp, dest)
+    if (hadPrevious) renameSync(dest, backup)
+    try {
+      renameSync(tmp, dest)
+      swapped = true
+    } catch (e) {
+      if (hadPrevious) {
+        try { renameSync(backup, dest) } catch { /* noop */ }
+      }
+      throw e
+    }
+    // The payload's sha256 was verified against the release digest above;
+    // record the new hash and prove the on-disk bytes match it.
+    updateManifestEntries(resourcesRoot, [relativePath])
+    verifyTgwsBinary(dest)
   } catch (e) {
     try {
-      unlinkSync(tmp)
+      if (existsSync(tmp)) unlinkSync(tmp)
     } catch {
       /* noop */
+    }
+    if (swapped) {
+      try { rmSync(dest, { force: true }) } catch { /* noop */ }
+      if (hadPrevious) {
+        try { renameSync(backup, dest) } catch { /* noop */ }
+      }
+    }
+    if (previousManifest) {
+      try { writeManifestEntries(resourcesRoot, previousManifest) } catch { /* noop */ }
     }
     throw new Error(
       `Не удалось установить TgWsProxy: ${e instanceof Error ? e.message : String(e)}`
     )
+  }
+
+  if (hadPrevious) {
+    try { rmSync(backup, { force: true }) } catch { /* noop */ }
   }
 
   // Persist version + clear "Later" dismissal.

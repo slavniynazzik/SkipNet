@@ -12,6 +12,7 @@
  */
 import { existsSync, readdirSync, readFileSync, statSync } from 'fs'
 import path from 'path'
+import { MANIFEST_NAME, verifyManifestDir } from './build-binary-manifest.mjs'
 
 const root = process.cwd()
 const dist = path.join(root, 'dist')
@@ -122,6 +123,19 @@ for (const asset of ['icon.ico', 'icon.png', 'icon_on.ico', 'icon_on.png', 'icon
 
 for (const asset of ['hosts-catalog.json', 'adobe-activation-hosts.json']) {
   check(existsSync(path.join(unpacked, 'resources', asset)), `missing resources/${asset}`)
+}
+
+// ---- Binary integrity manifest -------------------------------------------
+// `build:win` regenerates resources/binaries.sha256 before electron-builder
+// runs; here we prove the packaged copy matches the packaged binaries. The
+// app refuses to spawn anything that does not match this manifest.
+const packagedResources = path.join(unpacked, 'resources')
+const manifestFile = path.join(packagedResources, MANIFEST_NAME)
+check(existsSync(manifestFile), `missing resources/${MANIFEST_NAME}`)
+if (existsSync(manifestFile)) {
+  for (const problem of verifyManifestDir(packagedResources)) {
+    check(false, `binary manifest: ${problem}`)
+  }
 }
 
 const catalogPath = path.join(unpacked, 'resources', 'hosts-catalog.json')

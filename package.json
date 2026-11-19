@@ -27,7 +27,7 @@
     "verify:dist": "node scripts/verify-dist.mjs",
     "dev": "electron-vite dev",
     "postinstall": "electron-builder install-app-deps",
-    "build:win": "electron-vite build && electron-builder --publish never --win && node scripts/verify-dist.mjs && node scripts/archive-release.mjs",
+    "build:win": "node scripts/build-binary-manifest.mjs && electron-vite build && electron-builder --publish never --win && node scripts/verify-dist.mjs && node scripts/archive-release.mjs",
     "build:mac": "electron-vite build && electron-builder --publish never --mac",
     "build:linux": "electron-vite build && electron-builder --publish never --linux"
   },

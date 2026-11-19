@@ -80,9 +80,8 @@ interface TgwsConfig {
   cfproxyPriority?: boolean
   cfproxyUserDomain?: string
   fakeTlsDomain?: string
-  binaryPath?: string     // override path to TgWsProxy_windows.exe
-  // Version of the TgWsProxy_windows.exe currently installed in
-  // runtime/tgws/. Set by the auto-updater. Used to decide whether a
+  // Version of the TgWsProxy_windows.exe shipped/updated in the bundled
+  // resources/tgws/ folder. Set by the auto-updater. Used to decide whether a
   // newer Flowseal/tg-ws-proxy release is available.
   installedVersion?: string
   // Tag the user explicitly dismissed via "Later"; updater stays quiet
@@ -104,11 +103,11 @@ interface ZapretConfig {
   // Automatic Zapret update check (banner on the Zapret page). Mirrors
   // `utils/check_updates.enabled` in the bundle.
   checkUpdates?: boolean
-  bundlePath?: string              // override path to unpacked zapret folder
+  bundlePath?: string              // legacy override, ignored (never used for execution)
   useService?: boolean             // installed as Windows service
-  // Version of the unpacked Flowseal/zapret-discord-youtube bundle in
-  // runtime/zapret. Set when the user installs/updates from the auto-
-  // updater. Used to decide whether a newer GitHub release exists.
+  // Version of the unpacked Flowseal/zapret-discord-youtube bundle in the
+  // bundled resources/zapret folder. Set when the user installs/updates from
+  // the auto-updater. Used to decide whether a newer GitHub release exists.
   installedVersion?: string
   // ISO timestamp + tag the user explicitly dismissed via "Later". The
   // updater will stay quiet for that exact tag until a newer one ships.

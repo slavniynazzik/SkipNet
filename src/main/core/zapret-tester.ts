@@ -14,6 +14,7 @@ import {
   withZapretLock
 } from './zapret'
 import { getAppConfig } from '../config'
+import { verifyZapretBundle } from './binary-integrity'
 
 // HTTPS hosts that DPI bypass solutions are typically tested against.
 const HTTP_TARGETS: string[] = [
@@ -193,6 +194,11 @@ async function testOneStrategy(batPath: string): Promise<{
   score: number
   passed: boolean
 }> {
+  // Same fail-closed check startZapretImpl uses. Verified before we touch the
+  // running bypass or spawn anything: a tampered strategy must never be
+  // executed just because the user pressed "run tests".
+  verifyZapretBundle(zapretBundleDir())
+
   // Defensive cleanup of any winws.exe still lingering from the previous
   // iteration — taskkill returns immediately when there's nothing to kill.
   await killWinws()
@@ -243,6 +249,10 @@ export function runStrategyTests(): Promise<StrategyTestReport> {
 
   runningPromise = (async () => {
     const startedAt = Date.now()
+
+    // Abort the whole sweep before killing the user's running bypass or
+    // spawning any strategy. Tampered payloads are never executed.
+    verifyZapretBundle(zapretBundleDir())
 
     const strategies = listStrategies()
     const total = strategies.length

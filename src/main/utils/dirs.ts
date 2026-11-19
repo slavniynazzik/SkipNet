@@ -115,28 +115,23 @@ export function logPath(): string {
   return path.join(logDir(), `${name}.log`)
 }
 
+/**
+ * Legacy location for non-executable leftovers from older releases.
+ *
+ * Executables are NEVER resolved from here: `%APPDATA%` is writable by any
+ * medium-integrity process, while SkipNet runs elevated. Zapret and TgWsProxy
+ * always resolve to the bundled resources tree (see `tgwsBinaryPath()` and
+ * `zapretBundleDir()`), which is admin-only when installed in Program Files.
+ */
 export function runtimeDir(): string {
   return path.join(dataDir(), 'runtime')
 }
 
-export function tgwsRuntimeDir(): string {
-  return path.join(runtimeDir(), 'tgws')
-}
-
 export function tgwsBinaryPath(): string {
-  // Check runtime dir first (downloaded updates), fall back to bundled resources/.
-  const rt = path.join(tgwsRuntimeDir(), 'TgWsProxy_windows.exe')
-  if (existsSync(rt)) return rt
   return path.join(resourcesDir(), 'tgws', 'TgWsProxy_windows.exe')
 }
 
-export function zapretRuntimeDir(): string {
-  return path.join(runtimeDir(), 'zapret')
-}
-
 export function zapretBundleDir(): string {
-  const rt = zapretRuntimeDir()
-  if (existsSync(path.join(rt, 'general.bat'))) return rt
   return path.join(resourcesDir(), 'zapret')
 }
 

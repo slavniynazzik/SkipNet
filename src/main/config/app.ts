@@ -3,6 +3,7 @@ import { appConfigPath } from '../utils/dirs'
 import { parseYaml, stringifyYaml } from '../utils/yaml'
 import { deepMerge } from '../utils/merge'
 import { defaultConfig, CONFIG_VERSION } from '../utils/template'
+import { sanitizeAppConfig, validateAppConfigPatch } from './schema'
 import { randomBytes, randomUUID } from 'crypto'
 import { readFileSync, existsSync } from 'fs'
 import { is } from '@electron-toolkit/utils'
@@ -10,10 +11,6 @@ import { enableAutoRun, disableAutoRun } from '../sys/autoRun'
 
 let appConfig: AppConfig | undefined
 let writePromise: Promise<void> = Promise.resolve()
-
-function isValidConfig(c: unknown): c is AppConfig {
-  return !!c && typeof c === 'object' && 'appTheme' in (c as object)
-}
 
 async function safeWriteConfig(content: string): Promise<void> {
   const configPath = appConfigPath()
@@ -52,8 +49,12 @@ async function readConfigFromDisk(): Promise<AppConfig | null> {
   for (const file of candidates) {
     try {
       const data = await readFile(file, 'utf-8')
-      const parsed = parseYaml<AppConfig>(data)
-      if (parsed && isValidConfig(parsed)) return parsed
+      const parsed = parseYaml<unknown>(data)
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) continue
+      if (!('appTheme' in (parsed as object))) continue
+      // Allow-list + drop legacy path overrides (`tgws.binaryPath`) and
+      // prototype-pollution keys before anything is merged.
+      return sanitizeAppConfig(parsed) as AppConfig
     } catch {
       /* try the next candidate */
     }
@@ -183,6 +184,12 @@ export async function getAppConfig(force = false): Promise<AppConfig> {
 }
 
 export async function patchAppConfig(patch: Partial<AppConfig>): Promise<void> {
+  // Validate BEFORE taking the write queue: an invalid patch must neither
+  // mutate the in-memory config nor reach the disk. Throws
+  // `ConfigValidationError` with the offending field path; `ipc.ts` turns it
+  // into `{ ok: false, message }`.
+  const cleanPatch = validateAppConfigPatch(patch)
+
   // Run the merge, the disk write and all dependent side effects inside the
   // serialized queue. Values captured *outside* the queue are stale when two
   // patches are fired back-to-back (the renderer does not await them), which
@@ -192,28 +199,29 @@ export async function patchAppConfig(patch: Partial<AppConfig>): Promise<void> {
     const prevDisableTray = appConfig?.disableTray
     const prevHideTaskbarIcon = appConfig?.hideTaskbarIcon
 
-    appConfig = deepMerge(appConfig ?? structuredClone(defaultConfig), patch)
+    appConfig = deepMerge(appConfig ?? structuredClone(defaultConfig), cleanPatch)
     await safeWriteConfig(stringifyYaml(appConfig))
 
-    if (patch.autoLaunch !== undefined && patch.autoLaunch !== prevAutoLaunch) {
+    if (cleanPatch.autoLaunch !== undefined && cleanPatch.autoLaunch !== prevAutoLaunch) {
       try {
-        if (patch.autoLaunch) await enableAutoRun()
+        if (cleanPatch.autoLaunch) await enableAutoRun()
         else await disableAutoRun()
       } catch { /* noop */ }
     }
     // React to tray toggle: create or destroy tray on the fly so the user
     // doesn't have to relaunch the app for the change to take effect.
-    if (patch.disableTray !== undefined && patch.disableTray !== prevDisableTray) {
+    if (cleanPatch.disableTray !== undefined && cleanPatch.disableTray !== prevDisableTray) {
       try {
         const tray = await import('../resolve/tray')
-        if (patch.disableTray) tray.destroyTray()
+        if (cleanPatch.disableTray) tray.destroyTray()
         else await tray.createTray()
       } catch { /* noop */ }
     }
     const disableTrayChanged =
-      patch.disableTray !== undefined && patch.disableTray !== prevDisableTray
+      cleanPatch.disableTray !== undefined && cleanPatch.disableTray !== prevDisableTray
     const hideChanged =
-      patch.hideTaskbarIcon !== undefined && patch.hideTaskbarIcon !== prevHideTaskbarIcon
+      cleanPatch.hideTaskbarIcon !== undefined &&
+      cleanPatch.hideTaskbarIcon !== prevHideTaskbarIcon
     if (hideChanged || disableTrayChanged) {
       try {
         const { applySkipTaskbar } = await import('../resolve/windowVisibility')
@@ -242,8 +250,10 @@ export async function patchAppConfig(patch: Partial<AppConfig>): Promise<void> {
 export function getAppConfigSync(): AppConfig {
   try {
     const raw = readFileSync(appConfigPath(), 'utf-8')
-    const data = parseYaml<AppConfig>(raw)
-    if (data && typeof data === 'object') return deepMerge(structuredClone(defaultConfig), data) as AppConfig
+    const data = parseYaml<unknown>(raw)
+    if (data && typeof data === 'object' && !Array.isArray(data)) {
+      return deepMerge(structuredClone(defaultConfig), sanitizeAppConfig(data)) as AppConfig
+    }
     return structuredClone(defaultConfig)
   } catch {
     return structuredClone(defaultConfig)

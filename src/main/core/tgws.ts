@@ -6,6 +6,8 @@ import os from 'os'
 import { BrowserWindow } from 'electron'
 import { tgwsBinaryPath } from '../utils/dirs'
 import { getAppConfig, patchAppConfig } from '../config'
+import { verifyTgwsBinary } from './binary-integrity'
+import { redactSecrets } from '../utils/redact'
 
 // ---- module state ----------------------------------------------------------
 
@@ -14,6 +16,10 @@ let status: CoreStatus = { state: 'stopped' }
 // User-initiated stop in progress — silences the "exited with code N" error
 // path in `child.on('exit')` (taskkill /F yields exit code 1, not SIGTERM).
 let stopRequested = false
+// Last known MTProto secret. Every log line is passed through
+// `redactSecrets(..., [activeSecret])` so the key can never reach the Logs
+// page or a support bundle, even if the proxy echoes it back on stderr.
+let activeSecret: string | null = null
 
 // ---- defaults --------------------------------------------------------------
 
@@ -35,7 +41,7 @@ function log(type: ControllerLog['type'], payload: string): void {
     time: Date.now(),
     type,
     source: 'tgws',
-    payload
+    payload: redactSecrets(payload, activeSecret ? [activeSecret] : undefined)
   } satisfies ControllerLog)
 }
 
@@ -68,11 +74,15 @@ function isValidSecret(secret: string | undefined): boolean {
 }
 
 async function ensureSecret(current: string | undefined): Promise<string> {
-  if (isValidSecret(current)) return current!
+  if (isValidSecret(current)) {
+    activeSecret = current!
+    return current!
+  }
   const fresh = randomBytes(16).toString('hex')
   log('warn', `secret invalid (len=${current?.length ?? 0}) — regenerated and persisted`)
   const cfg = await getAppConfig()
   await patchAppConfig({ tgws: { ...cfg.tgws!, secret: fresh } })
+  activeSecret = fresh
   return fresh
 }
 
@@ -217,11 +227,19 @@ async function startTgwsImpl(): Promise<void> {
   const cfg0 = await getAppConfig()
   if (!cfg0.tgws) throw new Error('tgws config missing')
 
-  const bin = cfg0.tgws.binaryPath || tgwsBinaryPath()
+  const bin = tgwsBinaryPath()
   if (!existsSync(bin)) {
     setStatus({ state: 'error', lastError: `TgWsProxy binary not found: ${bin}` })
     log('error', `binary missing: ${bin}`)
     throw new Error(`TgWsProxy binary not found: ${bin}`)
+  }
+  try {
+    verifyTgwsBinary(bin)
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    setStatus({ state: 'error', lastError: msg, pid: undefined })
+    log('error', msg)
+    throw new Error(msg)
   }
 
   setStatus({ state: 'starting', startedAt: Date.now(), lastError: undefined })
@@ -230,7 +248,7 @@ async function startTgwsImpl(): Promise<void> {
   try {
     // 1) Secret validation/regeneration ------------------------------------
     const secret = await ensureSecret(cfg0.tgws.secret)
-    log('info', `secret OK (len=${secret.length}, prefix=${secret.slice(0, 8)}…)`)
+    log('info', `secret OK (len=${secret.length})`)
 
     // Reload config in case secret was regenerated.
     const cfg = await getAppConfig()
@@ -264,7 +282,7 @@ async function startTgwsImpl(): Promise<void> {
     if (t.cfproxyUserDomain) args.push('--cfproxy-domain', t.cfproxyUserDomain)
     if (t.fakeTlsDomain) args.push('--fake-tls-domain', t.fakeTlsDomain)
 
-    log('info', `spawning: ${bin} ${args.join(' ')}`)
+    log('info', `spawning: ${bin} ${args.map((arg) => redactSecrets(arg)).join(' ')}`)
     const proc = spawn(bin, args, { windowsHide: true })
     child = proc
 

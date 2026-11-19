@@ -15,6 +15,7 @@ import { spawn, spawnSync } from 'node:child_process'
 import { zapretBundleDir } from '../utils/dirs'
 import { runPowerShellElevated } from '../utils/elevated'
 import { hostsHasYoutubeEntries } from './zapret-hosts'
+import { verifyZapretBundle } from './binary-integrity'
 
 export type DiagStatus = 'ok' | 'warn' | 'fail' | 'info'
 
@@ -525,6 +526,17 @@ export function runZapretTests(): RunTestsResult {
   const script = path.join(zapretBundleDir(), 'utils', 'test zapret.ps1')
   if (!existsSync(script)) {
     return { started: false, script, message: 'Файл utils\\test zapret.ps1 не найден в бандле.' }
+  }
+  // The script lives in the executable payload: verify the whole bundle (and
+  // this file in particular) before handing it to PowerShell.
+  try {
+    verifyZapretBundle(zapretBundleDir())
+  } catch (e) {
+    return {
+      started: false,
+      script,
+      message: e instanceof Error ? e.message : String(e)
+    }
   }
   try {
     const p = spawn(

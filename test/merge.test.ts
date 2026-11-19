@@ -20,12 +20,9 @@ describe('deepMerge', () => {
     expect(target).toEqual({ zapret: { enabled: false }, keep: 1 })
   })
 
-  // BUG (pre-existing): the nested branch calls `deepMerge(target[k], other[k])`.
-  // After `trimWrap` rewrites `<a>` to `a`, it reads `other.a` (undefined), so a
-  // wrapped object key is silently dropped. The array branch below uses
-  // `other[key]` and works. Task S6 should fix the lookup and this becomes a
-  // plain `it`.
-  it.fails('merges a wrapped <key> object subtree (currently a no-op)', () => {
+  // The nested branch used to read `other[trimWrap(key)]` after rewriting the
+  // key, so a wrapped object key was silently dropped. S6 fixed the lookup.
+  it('merges a wrapped <key> object subtree', () => {
     const target: Tree = { a: { x: 1 } }
 
     deepMerge(target, { '<a>': { y: 2 } })
@@ -89,12 +86,10 @@ describe('deepMerge', () => {
     expect(target).toEqual({ a: 1, nested: { b: 2 } })
   })
 
-  // SECURITY (S6 in REFACTOR_PLAN.md): today `deepMerge` walks `for..in` and
-  // writes through whatever key it receives, so a `__proto__` /
-  // `constructor.prototype` payload from parsed YAML/JSON pollutes
-  // Object.prototype. After S6 adds an own-key + block-list guard this test
-  // must be converted from `it.fails` to a plain `it`.
-  it.fails('does not pollute Object.prototype via __proto__ / constructor.prototype (S6)', () => {
+  // SECURITY (S6 in REFACTOR_PLAN.md): `deepMerge` walks own keys only and
+  // refuses `__proto__` / `constructor` / `prototype`, so a payload from parsed
+  // YAML/JSON can no longer pollute Object.prototype.
+  it('does not pollute Object.prototype via __proto__ / constructor.prototype (S6)', () => {
     const protoTarget: Tree = {}
 
     deepMerge(protoTarget, JSON.parse('{"__proto__":{"polluted":"yes"}}') as Tree)
@@ -106,12 +101,76 @@ describe('deepMerge', () => {
     const leaked = ({} as Tree).polluted
     const leakedCtor = ({} as Tree).pollutedCtor
 
-    // Clean up before asserting: an `it.fails` that never runs (e.g. after the
-    // S6 fix) must not leak the pollution into other suites.
+    // Clean up before asserting in case a regression leaks again.
     delete (Object.prototype as Tree).polluted
     delete (Object.prototype as Tree).pollutedCtor
 
     expect(leaked).toBeUndefined()
     expect(leakedCtor).toBeUndefined()
+    expect(protoTarget).toEqual({})
+  })
+
+  it('also blocks wrapped and bang-suffixed prototype keys', () => {
+    const target: Tree = {}
+
+    deepMerge(target, JSON.parse('{"<__proto__>":{"polluted":"yes"}}') as Tree)
+    deepMerge(target, JSON.parse('{"constructor!":{"prototype":{"polluted":"yes"}}}') as Tree)
+    deepMerge(target, JSON.parse('{"<prototype>":{"polluted":"yes"}}') as Tree)
+
+    expect(({} as Tree).polluted).toBeUndefined()
+    expect(target).toEqual({})
+  })
+
+  it('ignores inherited (non-own) keys', () => {
+    const inherited: Tree = { inherited: 'nope' }
+    const patch = Object.create(inherited) as Tree
+    patch.own = 'yes'
+    const target: Tree = {}
+
+    deepMerge(target, patch)
+
+    expect(target).toEqual({ own: 'yes' })
+  })
+
+  it('merges only plain objects, assigning class instances as-is', () => {
+    class Box {
+      value = 1
+    }
+    const instance = new Box()
+    const target: Tree = {}
+
+    deepMerge(target, { box: instance } as Tree)
+
+    expect(target.box).toBe(instance)
+  })
+
+  it('accepts null-prototype objects as mergeable plain objects', () => {
+    const child = Object.create(null) as Tree
+    child.b = 2
+    const target: Tree = { a: { x: 1 } }
+
+    deepMerge(target, { a: child } as Tree)
+
+    expect(target).toEqual({ a: { x: 1, b: 2 } })
+  })
+
+  it('stops at the depth cap instead of recursing without bound', () => {
+    const target: Tree = {}
+    const root: Tree = {}
+    let cursor = root
+    for (let i = 0; i < 48; i++) {
+      const next: Tree = {}
+      cursor.next = next
+      cursor = next
+    }
+    cursor.marker = 'deep'
+
+    expect(() => deepMerge(target, root)).not.toThrow()
+
+    // Levels beyond the cap are not merged, so the marker never lands.
+    let node: Tree | undefined = target
+    for (let i = 0; i < 48 && node; i++) node = node.next as Tree | undefined
+    expect(node).toBeUndefined()
+    expect(Object.keys(target)).toEqual(['next'])
   })
 })

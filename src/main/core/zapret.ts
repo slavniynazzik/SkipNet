@@ -4,9 +4,16 @@ import { existsSync, readdirSync, readFileSync, mkdirSync, rmSync, writeFileSync
 import path from 'path'
 import AdmZip from 'adm-zip'
 import { BrowserWindow } from 'electron'
-import { zapretBundleDir, zapretRuntimeDir } from '../utils/dirs'
+import { zapretBundleDir } from '../utils/dirs'
 import { getAppConfig } from '../config'
 import { applyGameFilterToBundle, getGameFilterSettings } from './zapret-settings'
+import {
+  collectComponentExecutableFiles,
+  readManifestOrNull,
+  updateManifestEntries,
+  verifyZapretBundle,
+  writeManifestEntries
+} from './binary-integrity'
 
 export interface StrategyDescriptor {
   file: string
@@ -135,12 +142,13 @@ export async function installZapretArchive(
     throw new Error('Архив повреждён или неполный: не найден bin/winws.exe')
   }
 
-  const dest = zapretRuntimeDir()
+  const dest = zapretBundleDir()
+  const resourcesRoot = path.dirname(dest)
   // Extract into a sibling staging directory and only swap it into place once
   // every file is written. The previous bundle must survive a failed extract
   // (disk full, AV lock, corrupt entry) — deleting it first leaves Zapret
   // unstartable until the user reinstalls.
-  // Random name: a pre-created `runtime\zapret.staging` junction could
+  // Random name: a pre-created `resources\zapret.staging` junction could
   // otherwise make rmSync delete an unrelated directory (the app is elevated).
   const staging = `${dest}.staging-${randomUUID()}`
   mkdirSync(staging, { recursive: true })
@@ -202,6 +210,29 @@ export async function installZapretArchive(
       `Не удалось установить бандл Zapret: ${e instanceof Error ? e.message : String(e)}`
     )
   }
+
+  // Re-hash the freshly installed payload and persist the manifest BEFORE the
+  // old bundle is deleted. If hashing/verification fails, restore the previous
+  // bundle and manifest so the next start keeps working instead of hitting a
+  // fail-closed integrity error.
+  const previousManifest = readManifestOrNull(resourcesRoot)
+  try {
+    const files = collectComponentExecutableFiles(resourcesRoot, dest)
+    updateManifestEntries(resourcesRoot, files)
+    verifyZapretBundle(dest)
+  } catch (e) {
+    try { rmSync(dest, { recursive: true, force: true }) } catch { /* noop */ }
+    if (hadPrevious) {
+      try { renameSync(previous, dest) } catch { /* noop */ }
+    }
+    if (previousManifest) {
+      try { writeManifestEntries(resourcesRoot, previousManifest) } catch { /* noop */ }
+    }
+    throw new Error(
+      `Не удалось проверить целостность нового бандла Zapret: ${e instanceof Error ? e.message : String(e)}`
+    )
+  }
+
   if (hadPrevious) {
     try { rmSync(previous, { recursive: true, force: true }) } catch { /* noop */ }
   }
@@ -448,6 +479,19 @@ async function startZapretImpl(): Promise<void> {
     setStatus({ state: 'error', lastError: `strategy not found: ${batPath}` })
     log('error', `strategy not found: ${batPath}`)
     throw new Error(`zapret strategy not found: ${batPath}`)
+  }
+
+  // Fail closed: never hand an unverified .bat to `cmd /c`. The manifest
+  // lives in the bundled resources tree (admin-only when installed), so a
+  // medium-integrity process cannot swap winws.exe/WinDivert/*.bat underneath
+  // an elevated launch.
+  try {
+    verifyZapretBundle(dir)
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    setStatus({ state: 'error', lastError: msg, pid: undefined })
+    log('error', msg)
+    throw new Error(msg)
   }
 
   setStatus({ state: 'starting', startedAt: Date.now(), lastError: undefined })

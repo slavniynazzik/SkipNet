@@ -3,9 +3,7 @@
   dataDir,
   logDir,
   runtimeDir,
-  themesDir,
-  tgwsRuntimeDir,
-  zapretRuntimeDir
+  themesDir
 } from './dirs'
 import { defaultConfig } from './template'
 import { stringifyYaml } from './yaml'
@@ -58,9 +56,7 @@ async function initDirs(): Promise<void> {
   const dirs = [
     themesDir(),
     logDir(),
-    runtimeDir(),
-    tgwsRuntimeDir(),
-    zapretRuntimeDir()
+    runtimeDir()
   ]
   await Promise.all(
     dirs.map(async (dir) => {
