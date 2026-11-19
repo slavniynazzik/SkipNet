@@ -18,6 +18,7 @@ import { broadcast } from '../utils/broadcast'
 import { applyGameFilterToBundle, getGameFilterSettings } from './zapret-settings'
 import {
   collectComponentExecutableFiles,
+  deleteManifest,
   readManifestOrNull,
   updateManifestEntries,
   verifyZapretBundle,
@@ -230,6 +231,8 @@ export async function installZapretArchive(
     }
     if (previousManifest) {
       try { writeManifestEntries(resourcesRoot, previousManifest) } catch { /* noop */ }
+    } else {
+      deleteManifest(resourcesRoot)
     }
     throw new Error(
       `Не удалось проверить целостность нового бандла Zapret: ${e instanceof Error ? e.message : String(e)}`

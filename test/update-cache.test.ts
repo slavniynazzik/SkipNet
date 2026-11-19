@@ -95,6 +95,23 @@ describe('update cache trust boundary', () => {
     })
   })
 
+  it('caps releaseNotes at 20 000 chars on save and load', () => {
+    const huge = 'x'.repeat(20_000 + 500)
+    saveUpdateCache('huge-notes', { tag: 'v1.5.0', version: '1.5.0', releaseNotes: huge })
+
+    const saved = JSON.parse(readFileSync(cacheFile('huge-notes'), 'utf8')) as {
+      data: { releaseNotes: string }
+    }
+    expect(saved.data.releaseNotes).toHaveLength(20_000)
+
+    // A hostile cache written by another process is clamped on load too.
+    writeRaw('huge-notes-read', {
+      at: Date.now(),
+      data: { tag: 'v1.5.0', version: '1.5.0', releaseNotes: huge }
+    })
+    expect(loadUpdateCache('huge-notes-read')?.data.releaseNotes).toHaveLength(20_000)
+  })
+
   it('returns null for malformed or non-object cache files', () => {
     const file = cacheFile('broken')
     writeFileSync(file, '{not json', 'utf8')

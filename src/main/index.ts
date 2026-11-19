@@ -8,6 +8,7 @@ import { registerIpcMainHandlers, isRelaunchRequested } from './utils/ipc'
 import { isTrustedFrameUrl, type TrustedFrameOptions } from './utils/ipc-trust'
 import { init } from './utils/init'
 import { getAppConfig, getAppConfigSync } from './config'
+import { devEnv } from './utils/dev-env'
 import { createTray, isTrayActive, refreshTray } from './resolve/tray'
 import { createApplicationMenu } from './resolve/menu'
 import { applyShortcuts } from './resolve/shortcut'
@@ -66,7 +67,9 @@ export function showError(title: string, message: string): void {
  */
 function trustedFrameOptions(): TrustedFrameOptions {
   return {
-    devUrl: process.env['ELECTRON_RENDERER_URL'],
+    // Packaged builds ignore ELECTRON_RENDERER_URL entirely: any process
+    // running as the same user could set it and become the trusted origin.
+    devUrl: is.dev ? devEnv('ELECTRON_RENDERER_URL') : undefined,
     prodIndexPath: join(__dirname, '../renderer/index.html')
   }
 }

@@ -187,16 +187,18 @@ export async function enableAutoRun(): Promise<AutoRunResult> {
   await removeLegacyTasks()
 
   const xml = buildTaskXml(exe, currentUserId())
-  // schtasks reads the XML from a file path passed via /XML. Random name: a
-  // fixed one in %TEMP% could be pre-created as a hardlink/symlink.
+  // schtasks reads the XML from a file path passed via /XML. Stage it in the
+  // admin-only directory with a random name: a fixed file in %TEMP% could be
+  // pre-created as a hardlink/symlink and swapped before schtasks reads it.
   const { writeFile, unlink } = await import('node:fs/promises')
-  const { tmpdir } = await import('node:os')
-  const { join } = await import('node:path')
-  const xmlPath = join(tmpdir(), `skipnet-task-${randomUUID()}.xml`)
+  const { secureStagingDir, stagingPath } = await import('../utils/secure-staging')
+  let xmlPath: string | null = null
   // Task Scheduler expects UTF-16 LE with BOM for the XML file.
   const buf = Buffer.from('\ufeff' + xml, 'utf16le')
   try {
-    await writeFile(xmlPath, buf, { flag: 'wx' })
+    secureStagingDir('tasks')
+    xmlPath = stagingPath('tasks', `skipnet-task-${randomUUID()}.xml`)
+    await writeFile(xmlPath, buf, { flag: 'wx', mode: 0o700 })
     const r = await runSchtasks(['/Create', '/F', '/TN', TASK_NAME, '/XML', xmlPath])
     if (r.code !== 0) {
       return {
@@ -215,7 +217,13 @@ export async function enableAutoRun(): Promise<AutoRunResult> {
       }`
     }
   } finally {
-    try { await unlink(xmlPath) } catch { /* noop */ }
+    if (xmlPath) {
+      try {
+        await unlink(xmlPath)
+      } catch {
+        /* already gone / admin-only folder can be cleaned later */
+      }
+    }
   }
 }
 

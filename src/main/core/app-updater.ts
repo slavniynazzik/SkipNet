@@ -1,10 +1,12 @@
-import { existsSync, mkdirSync, writeFileSync, unlinkSync } from 'fs'
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'fs'
 import { spawn } from 'child_process'
 import { randomUUID } from 'crypto'
 import path from 'path'
 import { app } from 'electron'
 import { dataDir, isPortable } from '../utils/dirs'
 import { sysBin } from '../utils/sys-bin'
+import { secureStagingDir } from '../utils/secure-staging'
+import { encodedPowerShellArgs } from '../utils/elevated'
 import { killAllOwnedSync } from './process-kill'
 import { getAppConfig, patchAppConfig } from '../config'
 import type { PersistedUpdateCache, UpdateCacheMetadata } from '../utils/update-cache'
@@ -221,6 +223,21 @@ function writeUpgradeMarker(): void {
 }
 
 /**
+ * Remove both upgrade markers. Called when the install aborts before the
+ * installer starts: a stale marker would make the *next* unrelated uninstall
+ * skip the user-data wipe and is therefore never left behind.
+ */
+function removeUpgradeMarkers(): void {
+  for (const name of [UPGRADE_MARKER_NAME, '.slipgate-upgrade']) {
+    try {
+      unlinkSync(upgradeMarkerPath(name))
+    } catch {
+      /* marker was not written / already gone */
+    }
+  }
+}
+
+/**
  * Install the release the main process last checked.
  *
  * The renderer supplies only a tag. Everything that decides *what* runs —
@@ -298,13 +315,31 @@ export async function installAppUpdate(tag: string): Promise<{ scheduled: true }
     throw new Error('Загруженный файл не является исполняемым файлом Windows (нет заголовка MZ)')
   }
 
-  // Write the installer to %TEMP% so it's auto-cleaned by Windows. Using
-  // a stable name plus a timestamp keeps concurrent retries (rare) from
-  // colliding while leaving older copies for Disk Cleanup to remove.
-  const dir = app.getPath('temp')
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
-  const installerPath = path.join(dir, `SkipNet-update-${randomUUID()}.exe`)
-  writeFileSync(installerPath, buf, { flag: 'wx' })
+  // Stage the installer in the admin-only ProgramData directory, not %TEMP%.
+  // The bytes were verified in memory above, but a user-writable path could be
+  // swapped between that check and the spawn. `wx` refuses to follow a
+  // pre-created file/link.
+  const installerPath = path.join(
+    secureStagingDir('updates'),
+    `SkipNet-update-${randomUUID()}.exe`
+  )
+  try {
+    writeFileSync(installerPath, buf, { flag: 'wx', mode: 0o700 })
+  } catch (e) {
+    throw new Error(
+      `Не удалось сохранить установщик во временный каталог: ${
+        e instanceof Error ? e.message : String(e)
+      }`
+    )
+  }
+
+  const deleteInstaller = (): void => {
+    try {
+      unlinkSync(installerPath)
+    } catch {
+      /* already gone / still locked — the admin-only folder can be cleaned later */
+    }
+  }
 
   // Tell the OLD installer's customUnInstall macro that this run is an
   // in-place upgrade and the user-data wipe MUST be skipped — otherwise
@@ -343,6 +378,34 @@ export async function installAppUpdate(tag: string): Promise<{ scheduled: true }
     /* noop */
   }
 
+  // Re-read the staged installer and verify it again *immediately* before the
+  // spawn. The in-memory buffer proved what was downloaded; this proves what
+  // the elevated process will actually execute, closing the verify-then-swap
+  // window on the staging path. A mismatch aborts and deletes the file.
+  try {
+    const onDisk = readFileSync(installerPath)
+    verifyAsset(onDisk, {
+      digest: expectedDigest,
+      size: asset.size,
+      minBytes: allowSmall ? 0 : MIN_INSTALLER_BYTES,
+      label: 'установщика SkipNet'
+    })
+    if (!(onDisk[0] === 0x4d && onDisk[1] === 0x5a)) {
+      throw new Error('файл не является исполняемым файлом Windows (нет заголовка MZ)')
+    }
+  } catch (e) {
+    deleteInstaller()
+    removeUpgradeMarkers()
+    if (consumeResumeZapretAfterUpdate()) {
+      startZapret().catch(() => void 0)
+    }
+    throw new Error(
+      `Установщик на диске не совпадает с проверенным — установка отменена: ${
+        e instanceof Error ? e.message : String(e)
+      }`
+    )
+  }
+
   // Spawn detached so the installer survives our app.quit(). Wait for the
   // actual spawn outcome before shutting down: if the installer cannot be
   // started (AV block, deleted file, EACCES) the app used to quit anyway,
@@ -365,11 +428,10 @@ export async function installAppUpdate(tag: string): Promise<{ scheduled: true }
     })
     installerPid = child.pid
   } catch (e) {
-    try {
-      unlinkSync(installerPath)
-    } catch {
-      /* noop — temp file, Windows will clean it eventually */
-    }
+    deleteInstaller()
+    // The installer never started, so the upgrade marker must not survive:
+    // the next uninstall would otherwise silently keep user data.
+    removeUpgradeMarkers()
     // The installer never started, so the app will keep running. Drop the
     // one-shot "restore Zapret" flag and turn Zapret back on if we stopped it.
     if (consumeResumeZapretAfterUpdate()) {
@@ -393,7 +455,10 @@ export async function installAppUpdate(tag: string): Promise<{ scheduled: true }
       const exePath = process.execPath
       const exeDir = path.dirname(exePath)
       const ts = randomUUID()
-      const logPath = path.join(dir, `SkipNet-relaunch-${ts}.log`)
+      // Diagnostics only — never executed, so %TEMP% is fine here.
+      const logDir = app.getPath('temp')
+      if (!existsSync(logDir)) mkdirSync(logDir, { recursive: true })
+      const logPath = path.join(logDir, `SkipNet-relaunch-${ts}.log`)
       const watcherScript = [
         "$ErrorActionPreference = 'SilentlyContinue'",
         `$installerPid = ${installerPid}`,
@@ -476,35 +541,26 @@ export async function installAppUpdate(tag: string): Promise<{ scheduled: true }
         'Log "all relaunch attempts failed"',
         'exit 1'
       ].join('\n')
-      const watcherPath = path.join(dir, `SkipNet-relaunch-${ts}.ps1`)
-      // Prepend BOM so PowerShell reads the script as UTF-8 even on
-      // legacy systems where the OEM code page would otherwise mangle
-      // non-ASCII characters in install paths.
-      writeFileSync(watcherPath, '\ufeff' + watcherScript, {
-        encoding: 'utf8',
-        flag: 'wx'
-      })
-      const watcher = spawn(
-        sysBin('powershell.exe'),
-        [
-          '-NoProfile',
-          '-WindowStyle',
-          'Hidden',
-          '-ExecutionPolicy',
-          'Bypass',
-          '-File',
-          watcherPath
-        ],
-        {
+      // Pass the script inline. A `%TEMP%\SkipNet-relaunch-*.ps1` could be
+      // rewritten between the write and `-File`; `-EncodedCommand` has no
+      // on-disk script to race. `encodePowerShellCommand` emits UTF-16LE with
+      // a BOM, so non-ASCII install paths survive the OEM code page.
+      const args = encodedPowerShellArgs(watcherScript)
+      // Base64 of a ~4 KB script is ~11 KB — comfortably below the ~32 KB
+      // command-line limit of CreateProcess.
+      if (args[args.length - 1].length > 26_000) {
+        console.warn('[app-updater] relaunch watcher script too large — skipping')
+      } else {
+        const watcher = spawn(sysBin('powershell.exe'), args, {
           detached: true,
           stdio: 'ignore',
           windowsHide: true
-        }
-      )
-      watcher.on('error', (e) =>
-        console.error('[app-updater] relaunch watcher spawn error:', e)
-      )
-      watcher.unref()
+        })
+        watcher.on('error', (e) =>
+          console.error('[app-updater] relaunch watcher spawn error:', e)
+        )
+        watcher.unref()
+      }
     } catch (e) {
       // Watcher is best-effort — if it fails the user just has to
       // double-click the desktop shortcut after install. Don't block

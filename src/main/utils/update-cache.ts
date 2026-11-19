@@ -29,6 +29,15 @@ export interface PersistedUpdateCache {
 
 const STRING_KEYS = ['tag', 'version', 'publishedAt', 'releaseNotes'] as const
 
+/** Release notes are display-only; cap them so a hostile cache can't bloat memory. */
+export const MAX_RELEASE_NOTES_CHARS = 20_000
+
+function clampReleaseNotes(value: string): string {
+  return value.length > MAX_RELEASE_NOTES_CHARS
+    ? value.slice(0, MAX_RELEASE_NOTES_CHARS)
+    : value
+}
+
 function cachePath(name: string): string {
   return path.join(dataDir(), `update-cache-${name}.json`)
 }
@@ -45,7 +54,8 @@ function sanitizeMetadata(value: unknown): UpdateCacheMetadata | null {
   for (const key of STRING_KEYS) {
     const candidate = source[key]
     if (typeof candidate === 'string' && candidate.trim()) {
-      out[key] = candidate.trim()
+      const trimmed = candidate.trim()
+      out[key] = key === 'releaseNotes' ? clampReleaseNotes(trimmed) : trimmed
     }
   }
   if (typeof source.hasUpdate === 'boolean') out.hasUpdate = source.hasUpdate

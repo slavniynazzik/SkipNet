@@ -5,6 +5,7 @@ import {
   buildElevatedLauncher,
   classifyElevatedResult,
   encodePowerShellCommand,
+  encodedPowerShellArgs,
   psQuote
 } from '@main/utils/elevated'
 
@@ -46,6 +47,29 @@ describe('encodePowerShellCommand', () => {
     const decoded = Buffer.from(encodePowerShellCommand(body), 'base64').toString('utf16le')
     expect(decoded.startsWith('\uFEFF')).toBe(true)
     expect(decoded).toContain('Папка')
+  })
+})
+
+describe('encodedPowerShellArgs', () => {
+  it('runs hidden, non-interactive and never references a .ps1 file', () => {
+    const args = encodedPowerShellArgs("Write-Output 'C:\\Папка'")
+
+    expect(args.slice(0, 5)).toEqual([
+      '-NoProfile',
+      '-NonInteractive',
+      '-WindowStyle',
+      'Hidden',
+      '-EncodedCommand'
+    ])
+    expect(args).not.toContain('-File')
+    const decoded = Buffer.from(args[5], 'base64').toString('utf16le')
+    expect(decoded).toContain('Папка')
+  })
+
+  it('keeps a ~4 KB watcher script well below the 32 KB command-line limit', () => {
+    const script = '$ErrorActionPreference = "SilentlyContinue"\n' + 'Log "line"\n'.repeat(400)
+    expect(script.length).toBeGreaterThan(3_000)
+    expect(encodedPowerShellArgs(script)[5].length).toBeLessThan(26_000)
   })
 })
 

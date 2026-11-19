@@ -148,7 +148,7 @@ describe('release tag gate', () => {
   it('requires the tag to match the last checked release', () => {
     expect(assertExpectedReleaseTag('v1.5.0', 'v1.5.0')).toBe('v1.5.0')
     expect(() => assertExpectedReleaseTag('v1.4.0', 'v1.5.0')).toThrow(
-      /не совпадает с последней проверенной/
+      /не совпадает с последней проверенной \(v1\.5\.0\)/
     )
     expect(() => assertExpectedReleaseTag('v1.5.0', undefined)).toThrow(
       /не совпадает с последней проверенной/

@@ -2,7 +2,7 @@ import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'n
 import os from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { writeHostsContentTo } from '@main/core/hosts-file'
+import { buildElevatedHostsWriteScript, writeHostsContentTo } from '@main/core/hosts-file'
 
 const tempDirs: string[] = []
 
@@ -14,6 +14,36 @@ function tempDir(): string {
 
 afterEach(() => {
   for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true })
+})
+
+describe('buildElevatedHostsWriteScript', () => {
+  const script = buildElevatedHostsWriteScript(
+    'C:\\ProgramData\\SkipNet\\hosts\\payload.txt',
+    'C:\\Windows\\System32\\drivers\\etc\\hosts',
+    'a'.repeat(64)
+  )
+
+  it('reads the staged payload exactly once and hashes those bytes in memory', () => {
+    expect(script.match(/ReadAllBytes/g)).toHaveLength(1)
+    // Get-FileHash would be a second read after the hash was computed.
+    expect(script).not.toContain('Get-FileHash')
+    expect(script).toContain('$bytes = [IO.File]::ReadAllBytes(')
+    expect(script).toContain('ComputeHash($bytes)')
+  })
+
+  it('writes the same bytes to a temp file in the target directory and fsyncs', () => {
+    expect(script).toContain("[IO.Path]::GetDirectoryName($target)")
+    expect(script).toContain('[IO.FileMode]::CreateNew')
+    expect(script).toContain('$fs.Write($bytes, 0, $bytes.Length)')
+    expect(script).toContain('$fs.Flush($true)')
+    expect(script).toContain('Move-Item -LiteralPath $tmp -Destination $target -Force')
+  })
+
+  it('propagates a checksum mismatch and a failed replace as non-zero exits', () => {
+    expect(script).toContain("Write-Error 'hosts checksum mismatch'")
+    expect(script.match(/exit 1/g)?.length).toBeGreaterThanOrEqual(2)
+    expect(script).toContain('exit 0')
+  })
 })
 
 describe('writeHostsContentTo (direct path)', () => {

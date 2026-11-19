@@ -6,6 +6,7 @@ import {
   BinaryIntegrityError,
   MANIFEST_NAME,
   collectComponentExecutableFiles,
+  deleteManifest,
   parseManifestText,
   resolveContainedPath,
   updateManifestEntries,
@@ -30,6 +31,11 @@ function buildFixture(): void {
   write('zapret/general.bat', '@echo off\r\nbin\\winws.exe\r\n')
   write('zapret/utils/test zapret.ps1', 'Write-Host test')
   write('tgws/TgWsProxy_windows.exe', 'MZ fake tgws')
+
+  // `updateManifestEntries` is fail-closed when the manifest is missing, so
+  // the fixture starts from a valid (placeholder) manifest that the update
+  // then rewrites — exactly like an installed build.
+  write(MANIFEST_NAME, `${'0'.repeat(64)}  bootstrap.exe\n`)
 
   updateManifestEntries(root, [
     ...collectComponentExecutableFiles(root, path.join(root, 'zapret')),
@@ -113,6 +119,16 @@ describe('verifyZapretBundle / verifyTgwsBinary', () => {
 })
 
 describe('updateManifestEntries', () => {
+  it('fails closed when the manifest is missing instead of seeding an empty one', () => {
+    rmSync(path.join(root, MANIFEST_NAME))
+
+    expect(() => updateManifestEntries(root, ['zapret/bin/winws.exe'])).toThrow(
+      /binaries\.sha256/
+    )
+    // Nothing was recreated.
+    expect(() => readFileSync(path.join(root, MANIFEST_NAME), 'utf8')).toThrow()
+  })
+
   it('prunes stale entries for files removed by an update', () => {
     const bundle = path.join(root, 'zapret')
     const withAlt = path.join(bundle, 'general (ALT).bat')
@@ -129,6 +145,12 @@ describe('updateManifestEntries', () => {
     )
     expect(manifest['zapret/general (ALT).bat']).toBeUndefined()
     expect(() => verifyZapretBundle(bundle)).not.toThrow()
+  })
+  it('can delete the manifest for a rollback that started without one', () => {
+    deleteManifest(root)
+
+    expect(() => verifyZapretBundle(path.join(root, 'zapret'))).toThrow(/не найден binaries\.sha256/)
+    expect(() => updateManifestEntries(root, ['zapret/bin/winws.exe'])).toThrow(/binaries\.sha256/)
   })
 })
 

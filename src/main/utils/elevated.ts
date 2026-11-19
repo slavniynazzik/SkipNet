@@ -55,6 +55,22 @@ export function encodePowerShellCommand(body: string): string {
 }
 
 /**
+ * Arguments for a hidden, non-interactive `powershell.exe -EncodedCommand`
+ * run. The script never touches the filesystem before it executes, so there is
+ * no `.ps1` for another process to swap while the command is starting.
+ */
+export function encodedPowerShellArgs(script: string): string[] {
+  return [
+    '-NoProfile',
+    '-NonInteractive',
+    '-WindowStyle',
+    'Hidden',
+    '-EncodedCommand',
+    encodePowerShellCommand(script)
+  ]
+}
+
+/**
  * Build the `-Command` script executed by the non-elevated launcher.
  *
  * Extracted as a pure function so the `-PassThru -Wait` + `exit $p.ExitCode`

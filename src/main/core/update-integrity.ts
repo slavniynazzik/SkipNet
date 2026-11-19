@@ -120,13 +120,17 @@ export function assertReleaseTag(tag: string): string {
 /**
  * The renderer may only install the release the main process last checked.
  * This prevents a compromised renderer from naming an arbitrary (older,
- * vulnerable) release.
+ * vulnerable) release. The expected tag is included in the error so the
+ * renderer can refresh its state and retry.
  */
 export function assertExpectedReleaseTag(tag: string, expectedTag: string | undefined): string {
   const value = assertReleaseTag(tag)
-  if (!expectedTag || expectedTag.trim() !== value) {
+  const expected = expectedTag?.trim()
+  if (!expected || expected !== value) {
     throw new Error(
-      'Запрошенная версия не совпадает с последней проверенной — обновите список обновлений'
+      expected
+        ? `Запрошенная версия не совпадает с последней проверенной (${expected}) — обновите список обновлений`
+        : 'Запрошенная версия не совпадает с последней проверенной — обновите список обновлений'
     )
   }
   return value

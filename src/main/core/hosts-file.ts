@@ -21,10 +21,10 @@ import {
   writeSync
 } from 'node:fs'
 import { createHash, randomUUID } from 'node:crypto'
-import os from 'node:os'
 import path from 'node:path'
 import { execFile } from 'node:child_process'
 import { psQuote, runPowerShellElevated } from '../utils/elevated'
+import { secureStagingDir } from '../utils/secure-staging'
 import { sysBin, windowsRoot } from '../utils/sys-bin'
 
 const BLOCK_START = '# --- SkipNet hosts editor BEGIN ---'
@@ -229,6 +229,56 @@ function writeHostsFileAtomically(target: string, payload: Buffer): void {
 }
 
 /**
+ * Build the elevated PowerShell body that replaces `target` with the staged
+ * payload.
+ *
+ * The staged file is read **exactly once** into `$bytes`; the hash is computed
+ * from those same bytes and those same bytes are written. There is no second
+ * read after hashing, so a process that swaps the staged file while the UAC
+ * prompt is open cannot inject hosts entries. The temporary file lives in the
+ * `etc` directory itself (same volume → atomic replace), is fsync'd via
+ * `FileStream.Flush($true)`, and is moved over `target` in one step.
+ */
+export function buildElevatedHostsWriteScript(
+  stagedPath: string,
+  target: string,
+  expectedSha256: string
+): string {
+  return [
+    "$ErrorActionPreference = 'Stop'",
+    `$expected = '${expectedSha256}'`,
+    `$bytes = [IO.File]::ReadAllBytes(${psQuote(stagedPath)})`,
+    '$sha = [Security.Cryptography.SHA256]::Create()',
+    'try {',
+    "  $actual = ([BitConverter]::ToString($sha.ComputeHash($bytes)) -replace '-', '').ToLower()",
+    '} finally {',
+    '  $sha.Dispose()',
+    '}',
+    "if ($actual -ne $expected) { Write-Error 'hosts checksum mismatch'; exit 1 }",
+    `$target = ${psQuote(target)}`,
+    '$dir = [IO.Path]::GetDirectoryName($target)',
+    "$tmp = [IO.Path]::Combine($dir, 'hosts.skipnet-' + [Guid]::NewGuid().ToString('N') + '.tmp')",
+    'try {',
+    '  $fs = [IO.File]::Open($tmp, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)',
+    '  try {',
+    '    $fs.Write($bytes, 0, $bytes.Length)',
+    '    $fs.Flush($true)',
+    '  } finally {',
+    '    $fs.Dispose()',
+    '  }',
+    '  Move-Item -LiteralPath $tmp -Destination $target -Force -ErrorAction Stop',
+    '} catch {',
+    '  if (Test-Path -LiteralPath $tmp) {',
+    '    Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue',
+    '  }',
+    '  Write-Error $_',
+    '  exit 1',
+    '}',
+    'exit 0'
+  ].join('\r\n')
+}
+
+/**
  * Write the hosts file. Direct write works when SkipNet has administrator
  * rights; otherwise retry through a UAC-elevated PowerShell copy.
  *
@@ -246,23 +296,24 @@ export function writeHostsContentTo(target: string, content: string): HostsWrite
     writeHostsFileAtomically(target, Buffer.from(content, 'latin1'))
     return { ok: true, elevated: false }
   } catch (directError) {
-    const tempPath = path.join(os.tmpdir(), `skipnet-hosts-new-${randomUUID()}.txt`)
+    const directMessage =
+      directError instanceof Error ? directError.message : String(directError)
+    // The payload is staged in the admin-only directory, not %TEMP%: the
+    // elevated process reads it after the UAC prompt, from a path a
+    // medium-integrity process cannot write.
+    let stagedPath: string | null = null
     try {
       const payload = Buffer.from(content, 'latin1')
-      writeFileSync(tempPath, payload, { flag: 'wx' })
+      stagedPath = path.join(
+        secureStagingDir('hosts'),
+        `skipnet-hosts-new-${randomUUID()}.txt`
+      )
+      writeFileSync(stagedPath, payload, { flag: 'wx', mode: 0o700 })
       const expected = createHash('sha256').update(payload).digest('hex')
-      // The elevated copy verifies the bytes, so a process that swaps the
-      // %TEMP% file while the UAC prompt is open cannot inject hosts entries.
-      const script =
-        `$expected = '${expected}'\r\n` +
-        `$actual = (Get-FileHash -LiteralPath ${psQuote(tempPath)} -Algorithm SHA256).Hash.ToLower()\r\n` +
-        "if ($actual -ne $expected) { Write-Error 'hosts checksum mismatch'; exit 1 }\r\n" +
-        'try {\r\n' +
-        `  Copy-Item -LiteralPath ${psQuote(tempPath)} -Destination ${psQuote(target)} -Force -ErrorAction Stop\r\n` +
-        '} catch {\r\n' +
-        '  Write-Error $_\r\n  exit 1\r\n' +
-        '}\r\n'
-      const elevated = runPowerShellElevated(script, 60_000)
+      const elevated = runPowerShellElevated(
+        buildElevatedHostsWriteScript(stagedPath, target, expected),
+        60_000
+      )
       if (elevated.ok) return { ok: true, elevated: true }
 
       if (elevated.outcome === 'uac-cancelled') {
@@ -292,14 +343,16 @@ export function writeHostsContentTo(target: string, content: string): HostsWrite
         elevated: false,
         reason: 'direct-failed',
         error:
-          message ||
-          (directError instanceof Error ? directError.message : String(directError))
+          `${message || 'Не удалось подготовить файл hosts для elevated-записи.'} ` +
+          `Прямая запись: ${directMessage}`
       }
     } finally {
-      try {
-        if (existsSync(tempPath)) unlinkSync(tempPath)
-      } catch {
-        /* temp file — Windows will clean it eventually */
+      if (stagedPath) {
+        try {
+          if (existsSync(stagedPath)) unlinkSync(stagedPath)
+        } catch {
+          /* staging file — the admin-only folder can be cleaned later */
+        }
       }
     }
   }

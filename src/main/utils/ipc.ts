@@ -1,4 +1,5 @@
 import { ipcMain, app, clipboard, BrowserWindow } from 'electron'
+import { is } from '@electron-toolkit/utils'
 import { getAppConfig, patchAppConfig } from '../config'
 import { applyTheme, setNativeTheme } from '../resolve/theme'
 import {
@@ -91,6 +92,7 @@ import {
 } from '../core/app-updater'
 import path from 'node:path'
 import { isTrustedFrameUrl, type TrustedFrameOptions } from './ipc-trust'
+import { devEnv } from './dev-env'
 import { appLog } from './app-logger'
 import { openTelegramLink } from './telegram-launch'
 import type { InvokeChannel } from '../../shared/ipc-channels'
@@ -109,7 +111,9 @@ const IPC_DENIED: IpcFailure = { ok: false, message: 'IPC rejected: untrusted se
 
 function trustedFrameOptions(): TrustedFrameOptions {
   return {
-    devUrl: process.env['ELECTRON_RENDERER_URL'],
+    // Packaged builds ignore ELECTRON_RENDERER_URL entirely: any process
+    // running as the same user could set it and become the trusted origin.
+    devUrl: is.dev ? devEnv('ELECTRON_RENDERER_URL') : undefined,
     prodIndexPath: path.join(__dirname, '../renderer/index.html')
   }
 }

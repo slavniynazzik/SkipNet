@@ -135,6 +135,95 @@ async function fetchOnce(url: string, opts: GithubFetchOptions): Promise<Respons
   }
 }
 
+/** A legitimate checksum manifest is a few hundred bytes. */
+const MAX_SUMS_BYTES = 2 * 1024 * 1024
+
+/**
+ * Candidate URLs for a fetch that must never touch a mirror.
+ *
+ * `SHA256SUMS.txt` is the root of trust when GitHub does not publish
+ * `asset.digest`: a mirror that answers with its own manifest could pair a
+ * malicious installer with a matching hash. Only the canonical
+ * `github.com/.../releases/download/...` URL is accepted; anything else throws
+ * before a network call. The single-element list keeps this in the same shape
+ * as `releaseAssetUrlCandidates` so "no mirror" is directly assertable.
+ */
+export function releaseAssetDirectCandidates(url: string): string[] {
+  const value = (url ?? '').trim()
+  if (classifyGithubUrl(value) !== 'release-asset') {
+    throw new Error(
+      'Прямая загрузка разрешена только с github.com/…/releases/download/… — ' +
+        'зеркала для этого файла не используются'
+    )
+  }
+  return [value]
+}
+
+async function readBoundedText(res: Response, maxBytes: number): Promise<string> {
+  const declared = res.headers?.get?.('content-length')
+  if (declared) {
+    const size = Number(declared)
+    if (Number.isFinite(size) && size > maxBytes) {
+      throw new Error(`Ответ слишком большой (${size} байт)`)
+    }
+  }
+  const body = res.body
+  if (!body) {
+    const text = await res.text()
+    if (Buffer.byteLength(text) > maxBytes) {
+      throw new Error(`Ответ слишком большой (${Buffer.byteLength(text)} байт)`)
+    }
+    return text
+  }
+  const reader = body.getReader()
+  const chunks: Buffer[] = []
+  let total = 0
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    if (!value) continue
+    total += value.byteLength
+    if (total > maxBytes) {
+      try {
+        await reader.cancel()
+      } catch {
+        /* noop */
+      }
+      throw new Error(`Ответ слишком большой (${total} байт)`)
+    }
+    chunks.push(Buffer.from(value))
+  }
+  return Buffer.concat(chunks).toString('utf8')
+}
+
+/**
+ * Fetch a release asset **without any mirror fallback** and with a hard byte
+ * cap. Redirects to `objects.githubusercontent.com` (how github.com serves
+ * release bytes) are allowed; any other final host is rejected.
+ *
+ * Used for trust material such as `SHA256SUMS.txt`, never for convenience.
+ */
+export async function fetchReleaseAssetDirect(
+  url: string,
+  opts: { maxBytes?: number; timeoutMs?: number } = {}
+): Promise<string> {
+  const [candidate] = releaseAssetDirectCandidates(url)
+  const maxBytes = opts.maxBytes ?? MAX_SUMS_BYTES
+  const res = await fetchOnce(candidate, {
+    headers: { 'User-Agent': REQUEST_HEADERS['User-Agent'] },
+    timeoutMs: opts.timeoutMs ?? 30_000
+  })
+  if (!res.ok) throw new Error(`GitHub ${res.status}`)
+  const finalUrl = (res as { url?: string }).url
+  if (finalUrl) {
+    const kind = classifyGithubUrl(finalUrl)
+    if (kind !== 'asset-redirect' && kind !== 'release-asset') {
+      throw new Error('Загрузка перенаправлена не на сервер GitHub — отменено')
+    }
+  }
+  return readBoundedText(res, maxBytes)
+}
+
 /**
  * Fetch release metadata. Exactly one candidate: `api.github.com`. No mirrors,
  * no environment overrides.
@@ -254,9 +343,10 @@ export function selectReleaseAsset(
  *
  * Preferred source is GitHub's own `asset.digest`. When the release predates
  * that field (or the value is not sha256), fall back to `SHA256SUMS.txt` from
- * the *same* release, downloaded from the same release's asset URL. If the
- * manifest is missing or has no line for this asset, installation aborts:
- * there is no path that installs an executable without a sha256.
+ * the *same* release, downloaded **directly** from github.com. Mirrors are
+ * never consulted for the manifest: a mirror that can rewrite the sums can
+ * pair a malicious installer with a matching hash. If the direct fetch fails
+ * there is no fallback, and installation aborts.
  */
 export async function resolveReleaseDigest(
   release: GhRelease,
@@ -278,21 +368,16 @@ export async function resolveReleaseDigest(
 
   let text: string
   try {
-    const res = await fetchReleaseAsset(sums.browser_download_url, {
-      headers: { 'User-Agent': REQUEST_HEADERS['User-Agent'] },
+    text = await fetchReleaseAssetDirect(sums.browser_download_url, {
+      maxBytes: MAX_SUMS_BYTES,
       timeoutMs: 30_000
     })
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    text = await res.text()
   } catch (e) {
     throw new Error(
-      `Не удалось получить SHA256SUMS.txt для ${label}: ${e instanceof Error ? e.message : String(e)}`
+      `Не удалось получить SHA256SUMS.txt для ${label} напрямую с GitHub ` +
+        `(зеркала не используются): ${e instanceof Error ? e.message : String(e)} — ` +
+        'установка отменена'
     )
-  }
-
-  // A legitimate manifest is a few hundred bytes. Refuse anything absurd.
-  if (text.length > 2 * 1024 * 1024) {
-    throw new Error(`SHA256SUMS.txt для ${label} подозрительно большой — установка отменена`)
   }
 
   const digest = parseSha256Sums(text, asset.name)

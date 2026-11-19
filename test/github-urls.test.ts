@@ -3,7 +3,9 @@ import {
   classifyGithubUrl,
   fetchGithubApi,
   fetchReleaseAsset,
+  fetchReleaseAssetDirect,
   githubApiUrl,
+  releaseAssetDirectCandidates,
   releaseAssetUrlCandidates,
   resolveReleaseDigest,
   type GhAsset,
@@ -148,6 +150,60 @@ describe('fetchReleaseAsset', () => {
   })
 })
 
+describe('fetchReleaseAssetDirect', () => {
+  it('has exactly one candidate: the canonical release URL', () => {
+    expect(releaseAssetDirectCandidates(ASSET_URL)).toEqual([ASSET_URL])
+  })
+
+  it('refuses a non-release URL before any network call', async () => {
+    const fetchMock = vi.fn(async () => new Response('bytes', { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(fetchReleaseAssetDirect(API_URL)).rejects.toThrow(/releases\/download/)
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('fetches the canonical URL once and never falls back to a mirror', async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL) => new Response('sums', { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(fetchReleaseAssetDirect(ASSET_URL)).resolves.toBe('sums')
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(fetchMock.mock.calls[0][0]).toBe(ASSET_URL)
+  })
+
+  it('fails closed when only a mirror would answer', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url === ASSET_URL) return new Response('direct down', { status: 502 })
+      return new Response('mirror bytes', { status: 200 })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(fetchReleaseAssetDirect(ASSET_URL)).rejects.toThrow()
+    // The mirror must never be called.
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(fetchMock.mock.calls[0][0]).toBe(ASSET_URL)
+  })
+
+  it('rejects a redirect away from GitHub', async () => {
+    const response = new Response('evil', { status: 200 })
+    Object.defineProperty(response, 'url', { value: 'https://evil.example/x' })
+    vi.stubGlobal('fetch', vi.fn(async () => response))
+
+    await expect(fetchReleaseAssetDirect(ASSET_URL)).rejects.toThrow(/перенаправлена/)
+  })
+
+  it('caps the body size', async () => {
+    const body = 'x'.repeat(64)
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(body, { status: 200 })))
+
+    await expect(fetchReleaseAssetDirect(ASSET_URL, { maxBytes: 16 })).rejects.toThrow(
+      /слишком большой/
+    )
+  })
+})
+
 describe('resolveReleaseDigest', () => {
   const release: GhRelease = {
     tag_name: 'v1.0.0',
@@ -176,16 +232,31 @@ describe('resolveReleaseDigest', () => {
     ).resolves.toBe(digest)
   })
 
-  it('falls back to SHA256SUMS.txt from the same release', async () => {
+  it('falls back to SHA256SUMS.txt from the same release, direct only', async () => {
     const sums = `# checksums\n${'b'.repeat(64)}  SkipNet_x64.exe\n`
+    const sumsUrl = release.assets![1].browser_download_url
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
-      expect(String(input)).toContain('SHA256SUMS.txt')
+      expect(String(input)).toBe(sumsUrl)
       return new Response(sums, { status: 200 })
     })
     vi.stubGlobal('fetch', fetchMock)
 
     await expect(resolveReleaseDigest(release, asset, 'установщика')).resolves.toBe(
       `sha256:${'b'.repeat(64)}`
+    )
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not accept a sums file that only a mirror can serve', async () => {
+    const sumsUrl = release.assets![1].browser_download_url
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) === sumsUrl) return new Response('down', { status: 502 })
+      return new Response(`${'c'.repeat(64)}  SkipNet_x64.exe\n`, { status: 200 })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(resolveReleaseDigest(release, asset, 'установщика')).rejects.toThrow(
+      /зеркала не используются/
     )
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })

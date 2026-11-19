@@ -177,6 +177,21 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
+/**
+ * Remove the manifest. Used only to roll back a failed component update that
+ * started without a previous manifest: leaving the partially written manifest
+ * behind would bless the bytes that failed verification. The next start then
+ * fails with the explicit "binaries.sha256 not found" message.
+ */
+export function deleteManifest(resourcesRoot: string): void {
+  const file = manifestPath(resourcesRoot)
+  try {
+    if (existsSync(file)) unlinkSync(file)
+  } catch {
+    /* best-effort rollback — verify stays fail-closed either way */
+  }
+}
+
 function hashFile(absolutePath: string): string {
   try {
     return createHash('sha256').update(readFileSync(absolutePath)).digest('hex')
@@ -308,6 +323,10 @@ export function verifyTgwsBinary(binaryPath: string): void {
  * Re-hash `relativePaths` and persist them in the manifest. Entries of the
  * same top-level component that are no longer present are dropped, so a
  * component update cannot leave stale hashes behind.
+ *
+ * The manifest must already exist. Seeding an empty one would make every
+ * previously shipped binary silently unverified, so a missing/unreadable
+ * `binaries.sha256` is a hard error (fail closed).
  */
 export function updateManifestEntries(
   resourcesRoot: string,
@@ -315,7 +334,7 @@ export function updateManifestEntries(
 ): void {
   const root = path.resolve(resourcesRoot)
   const relative = relativePaths.map((item) => safeRelativePath(item))
-  const entries = readManifestOrNull(root) ?? {}
+  const entries = readManifest(root)
 
   const prefixes = new Set(relative.map((item) => item.split('/')[0]))
   for (const key of Object.keys(entries)) {

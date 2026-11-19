@@ -4,6 +4,7 @@ import { randomUUID } from 'crypto'
 import { tgwsBinaryPath } from '../utils/dirs'
 import { getAppConfig, patchAppConfig } from '../config'
 import {
+  deleteManifest,
   readManifestOrNull,
   updateManifestEntries,
   verifyTgwsBinary,
@@ -321,6 +322,8 @@ export async function installTgwsUpdate(
     }
     if (previousManifest) {
       try { writeManifestEntries(resourcesRoot, previousManifest) } catch { /* noop */ }
+    } else {
+      deleteManifest(resourcesRoot)
     }
     throw new Error(
       `Не удалось установить TgWsProxy: ${e instanceof Error ? e.message : String(e)}`
