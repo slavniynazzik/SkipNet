@@ -3,6 +3,7 @@ import { CheckCircle2 } from 'lucide-react'
 import { Switch } from '@renderer/components/ui/switch'
 import HostsServiceIcon from '@renderer/components/hosts-service-icon'
 import { cn } from '@renderer/lib/utils'
+import { pluralRu } from '@renderer/lib/plural'
 import { defaultProfileFor, profileOptionsFor } from '@renderer/lib/hosts-profile'
 
 interface Props {
@@ -75,7 +76,7 @@ const HostsServiceCard = memo(function HostsServiceCard({
           {on && <CheckCircle2 className="size-3.5 shrink-0 text-emerald-400" />}
         </div>
         <div className="text-[11px] text-muted-foreground">
-          {domainCount(service)} доменов
+          {domainCount(service)} {pluralRu(domainCount(service), ['домен', 'домена', 'доменов'])}
           {on && service.kind === 'dns' ? ` · ${profileName(profiles, currentProfile)}` : ''}
         </div>
         {service.kind === 'dns' ? (

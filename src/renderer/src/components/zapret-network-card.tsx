@@ -5,6 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@renderer/components/u
 import { Button } from '@renderer/components/ui/button'
 import { Input } from '@renderer/components/ui/input'
 import { cn, POWER_ON_BANNER_STYLE } from '@renderer/lib/utils'
+import { pluralRu } from '@renderer/lib/plural'
 import {
   zapretGetGameFilter,
   zapretGetIpSetMode,
@@ -204,7 +205,7 @@ const ZapretNetworkCard: React.FC<Props> = ({ disabled = false, disabledReason, 
                   IPSet (список IP)
                 </span>
                 <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-[10px] font-mono text-muted-foreground">
-                  {ipset.entries} записей
+                  {ipset.entries} {pluralRu(ipset.entries, ['запись', 'записи', 'записей'])}
                 </span>
               </div>
               <div className="grid gap-2 sm:grid-cols-3">

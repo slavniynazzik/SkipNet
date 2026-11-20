@@ -13,6 +13,7 @@ import {
 import { Card, CardContent, CardHeader, CardTitle } from '@renderer/components/ui/card'
 import { Button } from '@renderer/components/ui/button'
 import { cn, POWER_ON_BANNER_STYLE } from '@renderer/lib/utils'
+import { pluralRu } from '@renderer/lib/plural'
 import {
   zapretGetCuratedIpSets,
   zapretGetIpList,
@@ -94,7 +95,7 @@ const ZapretIpListCard: React.FC<Props> = ({ disabled = false, disabledReason, r
       setListsStatus(listsResult.status === 'fulfilled' ? listsResult.value : result.status)
       toast.success(`Обновлено: ${label}`, {
         id: tId,
-        description: `${result.updated.length} файл(ов), ${result.totalEntries} записей. Перезапустите Zapret, чтобы применить изменения.`,
+        description: `${result.updated.length} ${pluralRu(result.updated.length, ['файл', 'файла', 'файлов'])}, ${result.totalEntries} ${pluralRu(result.totalEntries, ['запись', 'записи', 'записей'])}. Перезапустите Zapret, чтобы применить изменения.`,
         style: POWER_ON_BANNER_STYLE
       })
     } catch (e) {

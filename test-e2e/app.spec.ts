@@ -225,7 +225,7 @@ test.describe.serial('SkipNet renderer smoke', () => {
   test('shows a non-empty hosts catalog without applying anything', async () => {
     const target = getPage()
     await navigateTo(/^Hosts$/i, '/hosts', /(Редактор hosts|Hosts editor)/i)
-    await expect(target.getByText('сервисов включено в hosts')).toBeVisible()
+    await expect(target.getByText(/включён в hosts/).first()).toBeVisible()
 
     // Section headers render "<enabled> из <total>". The catalog is read-only
     // here: no toggle, apply, refresh or host-file button is clicked.

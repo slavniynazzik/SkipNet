@@ -59,7 +59,6 @@ const Zapret: React.FC = () => {
     !!zapret?.installedVersion &&
     storedReport.bundleVersion !== zapret.installedVersion
   const testReport = reportIsStale ? null : storedReport
-  const autoTestStartedRef = useRef(false)
   const [cancelling, setCancelling] = useState(false)
 
   const refreshStrategies = useCallback(async (): Promise<
@@ -102,18 +101,8 @@ const Zapret: React.FC = () => {
     void refreshStrategies()
   }, [refreshStrategies])
 
-  // Auto-test only after the test store finished hydrating, otherwise a
-  // stale "no report yet" snapshot would start a second sweep while the
-  // persisted report is still loading (R22).
-  const testStoreHydrated = useZapretTestStore((s) => s.hydrated)
-  useEffect(() => {
-    if (!testStoreHydrated || autoTestStartedRef.current) return
-    if (strategies.length === 0) return
-    const s = useZapretTestStore.getState()
-    autoTestStartedRef.current = true
-    if (s.report || s.isRunning) return
-    startTest()
-  }, [strategies, startTest, testStoreHydrated])
+  // The sweep is explicit: opening the page must not start a multi-minute
+  // test or disable the power switch. The user starts it from the button.
 
   // Automatic update check honours `zapret.checkUpdates` inside the shared
   // hook. Background errors stay silent: the banner is simply absent.

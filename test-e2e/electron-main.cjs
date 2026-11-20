@@ -17,6 +17,10 @@ const { EventEmitter } = require('node:events')
 const fs = require('node:fs')
 const path = require('node:path')
 
+// Report the packaged app version instead of Electron's own version so
+// screenshots and smoke assertions match the real product.
+app.setVersion(require('../package.json').version)
+
 // Never point the user's skipnet:// / tg-ws:// handlers at the dev electron.exe.
 app.setAsDefaultProtocolClient = () => true
 app.removeAsDefaultProtocolClient = () => true

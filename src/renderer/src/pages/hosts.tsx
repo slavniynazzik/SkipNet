@@ -20,6 +20,7 @@ import { Input } from '@renderer/components/ui/input'
 import { Switch } from '@renderer/components/ui/switch'
 import HostsServiceCard from '@renderer/components/hosts-service-card'
 import { cn } from '@renderer/lib/utils'
+import { pluralRu } from '@renderer/lib/plural'
 import { matchesService } from '@renderer/lib/hosts-search'
 import {
   hostsApply,
@@ -283,14 +284,16 @@ const Hosts: React.FC = () => {
               <div>
                 <div className="flex items-baseline gap-3">
                   <span className="text-4xl font-bold text-primary">{enabledCount}</span>
-                  <span className="text-sm text-muted-foreground">сервисов включено в hosts</span>
+                  <span className="text-sm text-muted-foreground">
+                    {pluralRu(enabledCount, ['сервис включён', 'сервиса включены', 'сервисов включены'])} в hosts
+                  </span>
                 </div>
                 <div className="mt-1 text-[11px] text-muted-foreground">
                   строк SkipNet в файле: {managedLines}
                   {catalogVersion ? ` · каталог ${catalogVersion}` : ''}
                   {checkedAt ? ` · каталог обновлён ${formatWhen(checkedAt)}` : ''}
                   {resolvedAt
-                    ? ` · живые адреса: ${resolvedHostnames} доменов (${formatWhen(resolvedAt)})`
+                    ? ` · живые адреса: ${resolvedHostnames} ${pluralRu(resolvedHostnames, ['домен', 'домена', 'доменов'])} (${formatWhen(resolvedAt)})`
                     : ''}
                   {skippedCount > 0 ? ` · пропущено адресов: ${skippedCount}` : ''}
                 </div>
@@ -387,7 +390,7 @@ const Hosts: React.FC = () => {
                   : <RefreshCw className="h-3.5 w-3.5" />}
                 Обновить каталог
               </Button>
-              <div className="relative ml-auto w-full sm:w-64">
+              <div className="relative min-w-[220px] flex-1">
                 <Search className="pointer-events-none absolute left-2 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
                 <Input
                   value={search}

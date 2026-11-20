@@ -64,6 +64,17 @@ const Logs: React.FC = () => {
     })
   }, [])
 
+  const EmptyPlaceholder = useCallback(
+    () => (
+      <div className="flex h-full items-center justify-center px-6 py-10 text-center font-sans text-sm text-muted-foreground">
+        {logs.length === 0
+          ? 'Пока пусто. Здесь появятся события Telegram, Zapret и приложения.'
+          : 'Ничего не найдено — измените фильтр или источник.'}
+      </div>
+    ),
+    [logs.length]
+  )
+
   return (
     <BasePage
       title="Логи"
@@ -120,6 +131,7 @@ const Logs: React.FC = () => {
           data={filteredLogs}
           initialTopMostItemIndex={Math.max(0, filteredLogs.length - 1)}
           followOutput={trace}
+          components={{ EmptyPlaceholder }}
           itemContent={(_i, log) => (
             <div className="px-4 py-0.5 flex gap-2 items-baseline hover:bg-accent/20">
               <span className="text-muted-foreground shrink-0">{formatLogTime(log.time)}</span>

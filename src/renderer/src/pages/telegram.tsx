@@ -14,7 +14,7 @@ import { Button } from '@renderer/components/ui/button'
 import { Input } from '@renderer/components/ui/input'
 import { Label } from '@renderer/components/ui/label'
 import { Card, CardContent, CardHeader, CardTitle } from '@renderer/components/ui/card'
-import { Copy, ExternalLink, MoreVertical, Loader2, RefreshCw } from 'lucide-react'
+import { Copy, ExternalLink, MoreVertical, Loader2, RefreshCw, Eye, EyeOff } from 'lucide-react'
 import TelegramIcon from '@renderer/components/telegram-icon'
 import ReloadTgwsIcon from '@renderer/components/reload-tgws-icon'
 import BasePage from '@renderer/components/base/base-page'
@@ -26,6 +26,11 @@ import { POWER_ON_BANNER_STYLE, BUNDLED_TGWS_VERSION } from '@renderer/lib/utils
 // existing toast.success({ style: POWER_ON_TOAST_STYLE }) call sites
 // don't need touching. Source of truth lives in lib/utils.ts.
 const POWER_ON_TOAST_STYLE = POWER_ON_BANNER_STYLE
+
+/** Hide the MTProto secret inside the shareable link until the user asks. */
+function maskProxyLink(link: string): string {
+  return link.replace(/(secret=)[^&]+/i, '$1••••••••••••')
+}
 
 function generateTgwsSecret(): string {
   const bytes = new Uint8Array(16)
@@ -40,6 +45,8 @@ const TelegramPage: React.FC = () => {
   const [portDraft, setPortDraft] = useState('')
   const [hostDraft, setHostDraft] = useState('')
   const [secretDraft, setSecretDraft] = useState('')
+  const [revealLink, setRevealLink] = useState(false)
+  const [revealSecret, setRevealSecret] = useState(false)
   const tgws = appConfig?.tgws
 
   // Keep local text drafts for every editable field. Writing the config on
@@ -61,7 +68,7 @@ const TelegramPage: React.FC = () => {
   // to the persisted value so the input never shows an unsaved setting.
   const commitPort = async (): Promise<void> => {
     const parsed = Number(portDraft)
-    if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65535) {
+    if (!Number.isInteger(parsed) || parsed < 1024 || parsed > 65535) {
       setPortDraft(String(tgws?.port ?? 1443))
       return
     }
@@ -294,7 +301,21 @@ const TelegramPage: React.FC = () => {
         </CardHeader>
         <CardContent className="space-y-3">
           <div className="flex items-center gap-2">
-            <Input readOnly value={link} className="font-mono text-xs" />
+            <Input
+              readOnly
+              value={revealLink ? link : maskProxyLink(link)}
+              aria-label="Ссылка для подключения к Telegram"
+              className="font-mono text-xs"
+            />
+            <Button
+              size="icon-sm"
+              variant="outline"
+              onClick={() => setRevealLink((value) => !value)}
+              title={revealLink ? 'Скрыть секрет в ссылке' : 'Показать полную ссылку'}
+              aria-label={revealLink ? 'Скрыть секрет в ссылке' : 'Показать полную ссылку'}
+            >
+              {revealLink ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+            </Button>
             <Button
               size="icon-sm"
               variant="outline"
@@ -384,22 +405,36 @@ const TelegramPage: React.FC = () => {
               onKeyDown={(e) => {
                 if (e.key === 'Enter') e.currentTarget.blur()
               }}
-              min={1}
+              min={1024}
               max={65535}
             />
           </div>
           <div className="md:col-span-2 space-y-1.5">
             <Label>Секретный ключ (32-hex MTProto)</Label>
-            <Input
-              value={secretDraft}
-              onChange={(e) => setSecretDraft(e.target.value)}
-              onBlur={() => { void commitSecret() }}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') e.currentTarget.blur()
-              }}
-              spellCheck={false}
-              className="font-mono text-xs"
-            />
+            <div className="flex items-center gap-2">
+              <Input
+                type={revealSecret ? 'text' : 'password'}
+                value={secretDraft}
+                onChange={(e) => setSecretDraft(e.target.value)}
+                onBlur={() => { void commitSecret() }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') e.currentTarget.blur()
+                }}
+                spellCheck={false}
+                autoComplete="off"
+                aria-label="Секретный ключ MTProto"
+                className="font-mono text-xs"
+              />
+              <Button
+                size="icon-sm"
+                variant="outline"
+                onClick={() => setRevealSecret((value) => !value)}
+                title={revealSecret ? 'Скрыть секретный ключ' : 'Показать секретный ключ'}
+                aria-label={revealSecret ? 'Скрыть секретный ключ' : 'Показать секретный ключ'}
+              >
+                {revealSecret ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+              </Button>
+            </div>
           </div>
         </CardContent>
       </Card>

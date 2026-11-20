@@ -4,6 +4,7 @@ import { ChevronDown, ChevronRight, Layers } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@renderer/components/ui/card'
 import { Button } from '@renderer/components/ui/button'
 import { cn } from '@renderer/lib/utils'
+import { pluralRu } from '@renderer/lib/plural'
 import {
   zapretGetFakes,
   zapretReplaceFake,
@@ -72,7 +73,7 @@ const ZapretFakesCard: React.FC<Props> = ({ disabled = false, disabledReason, re
           Активные фейки
           {status && (
             <span className="text-xs font-normal text-muted-foreground">
-              {status.fakes.length} файлов в bin
+              {status.fakes.length} {pluralRu(status.fakes.length, ['файл', 'файла', 'файлов'])} в bin
             </span>
           )}
         </CardTitle>
