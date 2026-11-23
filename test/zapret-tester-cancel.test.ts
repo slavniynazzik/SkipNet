@@ -8,17 +8,40 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   cancelStrategyTest,
+  chooseBestStrategy,
+  classifyCurl,
+  defaultTargets,
   isStrategyTestRunning,
+  loadBundleTargets,
+  parseTargets,
   runStrategyTestsWith,
+  summarizeProbes,
   type StrategyTesterDeps,
   type StrategyTestReport,
+  type TargetProbeResult,
   type TestProgress
 } from '@main/core/zapret-tester'
 import type { StrategyDescriptor } from '@main/core/zapret'
 
-function okResults(): Array<{ url: string; ok: boolean; ms: number }> {
-  return Array.from({ length: 4 }, (_, i) => ({ url: `https://t${i}.test`, ok: true, ms: 1 }))
+const okChecks = (): TargetProbeResult['checks'] => [
+  { label: 'HTTP', status: 'ok' },
+  { label: 'TLS1.2', status: 'ok' },
+  { label: 'TLS1.3', status: 'ok' }
+]
+
+function okResults(): TargetProbeResult[] {
+  return [
+    { name: 'Discord', isUrl: true, checks: okChecks(), ping: 'ok', pingMs: 5 },
+    { name: 'YouTube', isUrl: true, checks: okChecks(), ping: 'ok', pingMs: 7 },
+    { name: 'DNS', isUrl: false, checks: [], ping: 'ok', pingMs: 2 }
+  ]
 }
+
+const TEST_TARGETS = [
+  { name: 'Discord', url: 'https://discord.com', pingTarget: 'discord.com' },
+  { name: 'YouTube', url: 'https://www.youtube.com', pingTarget: 'www.youtube.com' },
+  { name: 'DNS', pingTarget: '1.1.1.1' }
+]
 
 function strategy(file: string): StrategyDescriptor {
   return { file, title: file, description: '' }
@@ -48,6 +71,7 @@ function makeDeps(overrides: Partial<StrategyTesterDeps> = {}): FakeDeps {
     bundleDir: () => 'C:\\fake\\zapret',
     verifyBundle: () => undefined,
     strategies: () => ['general1.bat', 'general2.bat', 'general3.bat'].map(strategy),
+    targets: () => TEST_TARGETS,
     status: () => ({ state: 'running' }),
     getConfig: async () => null,
     withZapretLock: async (fn) => {
@@ -99,7 +123,7 @@ describe('strategy sweep cancellation', () => {
     const deps = makeDeps()
 
     const run = runStrategyTestsWith(deps)
-    // Reach the first strategy's warm-up (spawn boundary 250 ms, boot instant).
+    // Reach the first strategy's probes (spawn boundary 250 ms, 300 ms settle).
     await vi.advanceTimersByTimeAsync(1000)
     expect(deps.events.some((event) => event.phase === 'testing')).toBe(true)
     expect(isStrategyTestRunning()).toBe(true)
@@ -159,7 +183,7 @@ describe('strategy sweep cancellation', () => {
     })
 
     const run = runStrategyTestsWith(deps)
-    // 250 spawn + 4500 warm-up + 400 cleanup = ~5.2 s for the first strategy.
+    // 250 spawn + 300 settle + 400 cleanup ≈ 1 s for the first strategy.
     await vi.advanceTimersByTimeAsync(6000)
     const report = await run
 
@@ -187,7 +211,7 @@ describe('strategy sweep resilience (B3)', () => {
     })
 
     const run = runStrategyTestsWith(deps)
-    // Three strategies; each successful one costs 250 spawn + 4500 warm-up +
+    // Three strategies; each successful one costs 250 spawn + 300 settle +
     // 400 cleanup. The failed one returns immediately.
     await vi.advanceTimersByTimeAsync(20_000)
     const report = await run
@@ -203,12 +227,32 @@ describe('strategy sweep resilience (B3)', () => {
       passed: false,
       okCount: 0,
       score: 0,
-      totalCount: 10
+      totalCount: 6
     })
     expect(report.results['general2.bat'].passed).toBe(true)
     expect(report.results['general3.bat'].passed).toBe(true)
     expect(report.cancelled).toBeUndefined()
     expect(isStrategyTestRunning()).toBe(false)
+  })
+
+  it('never truncates the report when the last strategy is broken', async () => {
+    vi.useFakeTimers()
+    let pid = 300
+    const deps = makeDeps({
+      status: () => ({ state: 'stopped' }),
+      spawnStrategy: (batPath) => {
+        if (batPath.endsWith('general3.bat')) throw new Error('spawn failed')
+        return { pid: (pid += 1) - 1, exitCode: null }
+      }
+    })
+
+    const run = runStrategyTestsWith(deps)
+    await vi.advanceTimersByTimeAsync(20_000)
+    const report = await run
+
+    expect(Object.keys(report.results)).toHaveLength(3)
+    expect(report.results['general3.bat'].passed).toBe(false)
+    expect(report.bestStrategy).toBe('general1.bat')
   })
 
   it('kills a child spawned by the abort race instead of leaking it', async () => {
@@ -245,5 +289,112 @@ describe('strategy sweep resilience (B3)', () => {
     expect(report.cancelled).toBe(true)
     expect(deps.killedPids).toContain(501)
     expect(isStrategyTestRunning()).toBe(false)
+  })
+})
+
+describe('upstream test semantics', () => {
+  it('parses targets.txt exactly like the PowerShell parser', () => {
+    const targets = parseTargets(
+      [
+        '# comment',
+        'DiscordMain = "https://discord.com"',
+        '  CloudflareDNS1111   =   "PING:1.1.1.1"  ',
+        'Broken line without value',
+        'Empty = ""'
+      ].join('\r\n')
+    )
+
+    expect(targets).toEqual([
+      { name: 'DiscordMain', url: 'https://discord.com', pingTarget: 'discord.com' },
+      { name: 'CloudflareDNS1111', pingTarget: '1.1.1.1' }
+    ])
+  })
+
+  it('falls back to the upstream target list when targets.txt is missing', () => {
+    const targets = loadBundleTargets('C:\\does-not-exist')
+    expect(targets.length).toBeGreaterThanOrEqual(16)
+    expect(targets.filter((t) => t.url).length).toBe(12)
+    expect(targets.filter((t) => !t.url).length).toBeGreaterThanOrEqual(4)
+    expect(defaultTargets().length).toBe(targets.length)
+  })
+
+  it('classifies curl outcomes the way the script does', () => {
+    expect(classifyCurl(0, '')).toBe('ok')
+    expect(classifyCurl(35, '')).toBe('unsup')
+    expect(classifyCurl(1, 'curl: (1) Protocol "tlsv1.3" not supported')).toBe('unsup')
+    expect(classifyCurl(60, 'SSL certificate problem: self signed certificate')).toBe('ssl')
+    expect(classifyCurl(28, 'Operation timed out')).toBe('error')
+    expect(classifyCurl(null, 'spawn curl.exe ENOENT')).toBe('error')
+  })
+
+  it('counts HTTP OK / ERR / UNSUP and ping OK / Fail', () => {
+    const summary = summarizeProbes([
+      {
+        name: 'Discord',
+        isUrl: true,
+        checks: [
+          { label: 'HTTP', status: 'ok' },
+          { label: 'TLS1.2', status: 'ok' },
+          { label: 'TLS1.3', status: 'error' }
+        ],
+        ping: 'ok',
+        pingMs: 12
+      },
+      {
+        name: 'YouTube',
+        isUrl: true,
+        checks: [
+          { label: 'HTTP', status: 'ssl' },
+          { label: 'TLS1.2', status: 'unsup' },
+          { label: 'TLS1.3', status: 'unsup' }
+        ],
+        ping: 'fail'
+      },
+      { name: 'DNS', isUrl: false, checks: [], ping: 'n/a' }
+    ])
+
+    expect(summary).toMatchObject({
+      okCount: 2,
+      errorCount: 2,
+      unsupportedCount: 2,
+      pingOkCount: 1,
+      pingFailCount: 1,
+      totalCount: 6
+    })
+    expect(summary.score).toBeCloseTo(2 / 6)
+  })
+
+  it('ranks by HTTP OK first and ping OK as the tie-breaker', () => {
+    const result = (
+      okCount: number,
+      pingOkCount: number
+    ): import('@main/core/zapret-tester').StrategyTestResult => ({
+      tested: true,
+      passed: okCount > 0,
+      okCount,
+      errorCount: 0,
+      unsupportedCount: 0,
+      pingOkCount,
+      pingFailCount: 0,
+      totalCount: 36,
+      score: okCount / 36,
+      targets: []
+    })
+
+    expect(
+      chooseBestStrategy({
+        'general1.bat': result(30, 16),
+        'general2.bat': result(34, 4),
+        'general3.bat': result(34, 12)
+      })
+    ).toBe('general3.bat')
+
+    // Upstream rule: equal OK, equal ping → the first config keeps the title.
+    expect(
+      chooseBestStrategy({
+        'general1.bat': result(10, 5),
+        'general2.bat': result(10, 5)
+      })
+    ).toBe('general1.bat')
   })
 })

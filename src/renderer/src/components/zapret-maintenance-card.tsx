@@ -325,9 +325,15 @@ const ZapretMaintenanceCard: React.FC<Props> = ({ disabled = false, disabledReas
         )}
 
         <div className="flex flex-wrap gap-2 border-t border-stroke pt-3">
-          <Button size="sm" variant="outline" onClick={() => { void runTests() }} disabled={locked || testsBusy}>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => { void runTests() }}
+            disabled={locked || testsBusy}
+            title="Резервный запуск родного utils\test zapret.ps1 в отдельном окне. Обычный тест с результатами в интерфейсе — в карточке «Стратегии»."
+          >
             {testsBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Terminal className="h-3.5 w-3.5" />}
-            Запустить тесты
+            Тесты в консоли
           </Button>
           <Button
             size="sm"

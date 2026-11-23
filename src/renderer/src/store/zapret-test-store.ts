@@ -64,11 +64,15 @@ export const attachZapretTestStore = (): (() => void) => {
       } else {
         const passed = Object.values(p.report.results).filter((r) => r.passed).length
         const total = Object.keys(p.report.results).length
+        // Upstream always names a "best" config, even when every probe failed;
+        // only show the hint when that strategy actually passed traffic.
+        const best = p.report.bestStrategy
+        const bestPassed = best ? p.report.results[best]?.passed === true : false
         toast.success('Тестирование стратегий завершено', {
           description:
             total > 0
               ? `Прошли проверку: ${passed} из ${total}` +
-                (p.report.bestStrategy ? `. Лучшая: ${p.report.bestStrategy}` : '')
+                (bestPassed && best ? `. Лучшая: ${best}` : '')
               : undefined,
           style: POWER_ON_BANNER_STYLE,
           duration: 6000

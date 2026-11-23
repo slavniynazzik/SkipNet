@@ -1,7 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { toast } from 'sonner'
-import { Loader2, FlaskConical, CheckCircle2, XCircle, RefreshCw } from 'lucide-react'
+import {
+  Loader2,
+  FlaskConical,
+  CheckCircle2,
+  XCircle,
+  RefreshCw,
+  ChevronDown
+} from 'lucide-react'
 import { useZapretStore } from '@renderer/store/zapret-store'
 import { useZapretTestStore } from '@renderer/store/zapret-test-store'
 import {
@@ -60,6 +67,7 @@ const Zapret: React.FC = () => {
     storedReport.bundleVersion !== zapret.installedVersion
   const testReport = reportIsStale ? null : storedReport
   const [cancelling, setCancelling] = useState(false)
+  const [expandedStrategy, setExpandedStrategy] = useState<string | null>(null)
 
   const refreshStrategies = useCallback(async (): Promise<
     { file: string; title: string; description: string }[]
@@ -417,59 +425,152 @@ const Zapret: React.FC = () => {
           )}
           {strategies.map((s) => {
             const result = testReport?.results[s.file]
-            // tested && !passed → strategy is dead on this user's network
+            // 0 successful HTTP/TLS checks means the strategy never passed
+            // traffic on this network, so it stays unselectable like before.
             const isFailed = !!result && result.tested && !result.passed
             const isPassed = !!result && result.tested && result.passed
-            const isBest = testReport?.bestStrategy === s.file
+            const isBest = !!result && result.passed && testReport?.bestStrategy === s.file
             const disabled = isFailed || isTestRunning || installing
+            const pingTotal = result ? result.pingOkCount + result.pingFailCount : 0
+            const expanded = expandedStrategy === s.file
             return (
-              <button
+              <div
                 key={s.file}
-                onClick={() => { void pickStrategy(s.file) }}
-                disabled={disabled}
-                aria-disabled={disabled}
-                title={
-                  isFailed
-                    ? `Не прошла тест (${result?.okCount ?? 0}/${result?.totalCount ?? 0} целей доступны). Нажмите «Перетестировать», чтобы повторить проверку.`
-                    : isTestRunning
-                      ? 'Тестирование стратегий — подождите окончания.'
-                      : undefined
-                }
                 className={cn(
-                  'group relative w-full text-left p-3 rounded-md border transition',
+                  'rounded-md border transition',
                   active === s.file
                     ? 'border-primary bg-primary/10'
-                    : 'border-border hover:bg-accent/30',
-                  disabled && 'opacity-40 grayscale cursor-not-allowed pointer-events-none hover:bg-transparent'
+                    : 'border-border',
+                  disabled && 'opacity-40 grayscale'
                 )}
               >
-                <div className="flex items-center gap-2">
-                  <div className="min-w-0 flex-1">
-                    <div className="font-medium text-sm flex items-center gap-2">
-                      <span className="truncate">{s.title}</span>
-                      {isBest && (
-                        <span className="shrink-0 text-[10px] uppercase tracking-wide font-semibold rounded px-1.5 py-0.5 bg-primary/20 text-primary">
-                          лучшая
-                        </span>
-                      )}
-                    </div>
-                    {s.description && (
-                      <div className="text-xs text-muted-foreground mt-0.5">{s.description}</div>
+                <div className="flex items-stretch">
+                  <button
+                    onClick={() => { void pickStrategy(s.file) }}
+                    disabled={disabled}
+                    aria-disabled={disabled}
+                    title={
+                      isFailed
+                        ? `Не прошла тест: HTTP ${result?.okCount ?? 0}/${result?.totalCount ?? 0}. Нажмите «Перетестировать», чтобы повторить проверку.`
+                        : isTestRunning
+                          ? 'Тестирование стратегий — подождите окончания.'
+                          : undefined
+                    }
+                    className={cn(
+                      'group relative min-w-0 flex-1 text-left p-3 rounded-md transition',
+                      !disabled && 'hover:bg-accent/30',
+                      disabled && 'cursor-not-allowed pointer-events-none'
                     )}
-                  </div>
-                  {isFailed ? (
-                    <span className="shrink-0 inline-flex items-center gap-1 text-[11px] text-red-400">
-                      <XCircle className="h-3.5 w-3.5" />
-                      {result?.okCount ?? 0}/{result?.totalCount ?? 0}
-                    </span>
-                  ) : isPassed ? (
-                    <span className="shrink-0 inline-flex items-center gap-1 text-[11px] text-emerald-400">
-                      <CheckCircle2 className="h-3.5 w-3.5" />
-                      {result?.okCount ?? 0}/{result?.totalCount ?? 0}
-                    </span>
+                  >
+                    <div className="flex items-center gap-2">
+                      <div className="min-w-0 flex-1">
+                        <div className="font-medium text-sm flex items-center gap-2">
+                          <span className="truncate">{s.title}</span>
+                          {isBest && (
+                            <span className="shrink-0 text-[10px] uppercase tracking-wide font-semibold rounded px-1.5 py-0.5 bg-primary/20 text-primary">
+                              лучшая
+                            </span>
+                          )}
+                        </div>
+                        {s.description && (
+                          <div className="text-xs text-muted-foreground mt-0.5">{s.description}</div>
+                        )}
+                        {result ? (
+                          <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-muted-foreground font-mono">
+                            <span>
+                              HTTP {result.okCount}/{result.totalCount}
+                            </span>
+                            <span>· ping {result.pingOkCount}/{pingTotal}</span>
+                            {result.unsupportedCount > 0 && (
+                              <span className="text-amber-400">UNSUP {result.unsupportedCount}</span>
+                            )}
+                            {result.errorCount > 0 && (
+                              <span className="text-red-400">ERR {result.errorCount}</span>
+                            )}
+                          </div>
+                        ) : null}
+                      </div>
+                      {isFailed ? (
+                        <span className="shrink-0 inline-flex items-center gap-1 text-[11px] text-red-400">
+                          <XCircle className="h-3.5 w-3.5" />
+                          {result?.okCount ?? 0}/{result?.totalCount ?? 0}
+                        </span>
+                      ) : isPassed ? (
+                        <span className="shrink-0 inline-flex items-center gap-1 text-[11px] text-emerald-400">
+                          <CheckCircle2 className="h-3.5 w-3.5" />
+                          {result?.okCount ?? 0}/{result?.totalCount ?? 0}
+                        </span>
+                      ) : null}
+                    </div>
+                  </button>
+                  {result && result.targets?.length > 0 ? (
+                    <button
+                      onClick={() => setExpandedStrategy(expanded ? null : s.file)}
+                      aria-expanded={expanded}
+                      aria-label={`Подробности теста ${s.title}`}
+                      title="Подробности по целям"
+                      className="shrink-0 border-l border-stroke px-2 text-muted-foreground hover:text-foreground"
+                    >
+                      <ChevronDown
+                        className={cn('h-4 w-4 transition-transform', expanded && 'rotate-180')}
+                      />
+                    </button>
                   ) : null}
                 </div>
-              </button>
+                {expanded && result ? (
+                  <div className="border-t border-stroke px-3 py-2 space-y-1">
+                    {result.targets.map((t) => (
+                      <div
+                        key={t.name}
+                        className="flex flex-wrap items-center justify-between gap-x-3 gap-y-0.5 text-[11px] font-mono"
+                      >
+                        <span className="text-muted-foreground">{t.name}</span>
+                        <span className="flex flex-wrap items-center gap-1.5">
+                          {t.checks.map((c) => (
+                            <span
+                              key={c.label}
+                              className={cn(
+                                c.status === 'ok'
+                                  ? 'text-emerald-400'
+                                  : c.status === 'unsup'
+                                    ? 'text-amber-400'
+                                    : 'text-red-400'
+                              )}
+                            >
+                              {c.label}:
+                              {c.status === 'ok'
+                                ? 'OK'
+                                : c.status === 'unsup'
+                                  ? 'UNSUP'
+                                  : c.status === 'ssl'
+                                    ? 'SSL'
+                                    : 'ERR'}
+                            </span>
+                          ))}
+                          <span
+                            className={cn(
+                              t.ping === 'ok'
+                                ? 'text-sky-400'
+                                : t.ping === 'fail'
+                                  ? 'text-red-400'
+                                  : 'text-muted-foreground'
+                            )}
+                          >
+                            ping{' '}
+                            {t.ping === 'ok'
+                              ? t.pingMs !== undefined
+                                ? `${t.pingMs} ms`
+                                : 'OK'
+                              : t.ping === 'fail'
+                                ? 'timeout'
+                                : 'n/a'}
+                          </span>
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
             )
           })}
         </CardContent>

@@ -84,12 +84,28 @@ export const zapretDismissUpdate = (tag: string): Promise<void> =>
   invoke('zapret:dismissUpdate', tag)
 
 // ---- Zapret strategy tester -------------------------------------------------
+// Mirrors the upstream `test zapret.ps1` analytics (HTTP OK / ERR / UNSUP,
+// ping OK / Fail) so the GUI shows the same numbers as the console report.
+export type HttpCheckStatus = 'ok' | 'error' | 'unsup' | 'ssl'
+export interface StrategyTargetResult {
+  name: string
+  isUrl: boolean
+  checks: { label: 'HTTP' | 'TLS1.2' | 'TLS1.3'; status: HttpCheckStatus }[]
+  ping: 'ok' | 'fail' | 'n/a'
+  pingMs?: number
+}
 export interface StrategyTestResult {
+  tested: true
+  /** At least one HTTP/TLS check succeeded (upstream's primary metric). */
   passed: boolean
   okCount: number
+  errorCount: number
+  unsupportedCount: number
+  pingOkCount: number
+  pingFailCount: number
   totalCount: number
   score: number
-  tested: true
+  targets: StrategyTargetResult[]
 }
 export interface StrategyTestReport {
   ranAt: number
@@ -99,6 +115,7 @@ export interface StrategyTestReport {
   bestStrategy?: string
   /** True when the sweep was stopped early (cancel, deadline or pre-empt). */
   cancelled?: boolean
+  mode?: 'standard'
 }
 export interface StrategyTestProgress {
   phase: 'starting' | 'testing' | 'completed' | 'error' | 'idle'
