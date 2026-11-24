@@ -174,11 +174,19 @@ export interface ZapretListFileStatus {
   bytes: number
   updatedAt?: string
 }
+export interface ZapretListsSummary {
+  hostEntries: number
+  uniqueHostEntries: number
+  ipsetEntries: number
+  ipsetBackupEntries: number
+  ipsetMode: IpSetMode
+}
 export interface ZapretListsStatus {
   dir: string
   available: boolean
   source: string
   files: ZapretListFileStatus[]
+  summary: ZapretListsSummary
 }
 export interface ZapretListsUpdateResult {
   updated: Array<{

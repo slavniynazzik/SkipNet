@@ -225,7 +225,11 @@ test.describe.serial('SkipNet renderer smoke', () => {
   test('shows a non-empty hosts catalog without applying anything', async () => {
     const target = getPage()
     await navigateTo(/^Hosts$/i, '/hosts', /(Редактор hosts|Hosts editor)/i)
-    await expect(target.getByText(/включён в hosts/).first()).toBeVisible()
+    // The section header reads "<N> сервис/сервиса/сервисов включён/включены в hosts".
+    // Match the invariant tail instead of one grammatical form: the enabled
+    // count depends on the machine's real hosts file, so hard-coding the
+    // singular form made the test flaky.
+    await expect(target.getByText(/в hosts$/).first()).toBeVisible()
 
     // Section headers render "<enabled> из <total>". The catalog is read-only
     // here: no toggle, apply, refresh or host-file button is clicked.

@@ -8,6 +8,7 @@ import {
   PlusCircle,
   RefreshCw,
   RotateCcw,
+  ShieldCheck,
   Trash2
 } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@renderer/components/ui/card'
@@ -18,12 +19,14 @@ import {
   zapretGetCuratedIpSets,
   zapretGetIpList,
   zapretGetListsStatus,
+  zapretSetIpSetMode,
   zapretUpdateLists,
   zapretApplyIpListPatch,
   zapretClearIpList,
   zapretRestoreIpListBackup,
   type CuratedIpSet,
   type IpListSnapshot,
+  type IpSetMode,
   type ZapretListsScope,
   type ZapretListsStatus
 } from '@renderer/utils/ipc'
@@ -35,6 +38,10 @@ interface Props {
   refreshKey?: string | number
 }
 
+function ipsetModeLabelFor(mode: IpSetMode | undefined): string {
+  return mode === 'loaded' ? 'По списку' : mode === 'any' ? 'Все IP' : 'Отключён'
+}
+
 const ZapretIpListCard: React.FC<Props> = ({ disabled = false, disabledReason, refreshKey }) => {
   const [open, setOpen] = useState(false)
   const [snapshot, setSnapshot] = useState<IpListSnapshot | null>(null)
@@ -44,6 +51,7 @@ const ZapretIpListCard: React.FC<Props> = ({ disabled = false, disabledReason, r
   const [busy, setBusy] = useState(false)
   const [listsStatus, setListsStatus] = useState<ZapretListsStatus | null>(null)
   const [updating, setUpdating] = useState<ZapretListsScope | null>(null)
+  const [ipsetBusy, setIpsetBusy] = useState(false)
 
   const refresh = async (): Promise<void> => {
     try {
@@ -67,6 +75,13 @@ const ZapretIpListCard: React.FC<Props> = ({ disabled = false, disabledReason, r
     void refresh()
   }, [refreshKey])
 
+  // The IPSet mode can be changed from the network card, and the list files
+  // can be edited outside SkipNet. Re-read them whenever the card is opened so
+  // the counters are never a stale snapshot from application start.
+  useEffect(() => {
+    if (open) void refresh()
+  }, [open])
+
   const togglePicked = (id: string): void => {
     setPicked((prev) => {
       const next = new Set(prev)
@@ -77,7 +92,8 @@ const ZapretIpListCard: React.FC<Props> = ({ disabled = false, disabledReason, r
   }
 
   const updateFromGithub = async (scope: ZapretListsScope): Promise<void> => {
-    if (busy || updating) return
+    if (busy || updating || ipsetBusy) return
+    const before = listsStatus?.summary
     setUpdating(scope)
     const label =
       scope === 'ip' ? 'IP-список' : scope === 'hosts' ? 'списки хостов' : 'все списки'
@@ -92,10 +108,26 @@ const ZapretIpListCard: React.FC<Props> = ({ disabled = false, disabledReason, r
         zapretGetListsStatus()
       ])
       if (snapResult.status === 'fulfilled') setSnapshot(snapResult.value)
-      setListsStatus(listsResult.status === 'fulfilled' ? listsResult.value : result.status)
+      const nextStatus =
+        listsResult.status === 'fulfilled' ? listsResult.value : result.status
+      setListsStatus(nextStatus)
+      const after = nextStatus.summary
+      // Show the delta explicitly: an update that downloads identical content
+      // must still prove that it ran and that the counters were re-read.
+      const delta =
+        before && after
+          ? ` · хосты ${before.hostEntries} → ${after.hostEntries} · IP ${before.ipsetEntries} → ${after.ipsetEntries}`
+          : ''
+      // When IPSet mode is off, the downloaded ranges live in `.backup` and the
+      // visible IP counter cannot grow. Say so, otherwise the update looks like
+      // a no-op even though the download succeeded.
+      const parked =
+        scope !== 'hosts' && after && after.ipsetMode !== 'loaded' && after.ipsetBackupEntries > 0
+          ? ` IP-диапазоны сохранены в резервную копию (режим «${ipsetModeLabelFor(after.ipsetMode)}»).`
+          : ''
       toast.success(`Обновлено: ${label}`, {
         id: tId,
-        description: `${result.updated.length} ${pluralRu(result.updated.length, ['файл', 'файла', 'файлов'])}, ${result.totalEntries} ${pluralRu(result.totalEntries, ['запись', 'записи', 'записей'])}. Перезапустите Zapret, чтобы применить изменения.`,
+        description: `${result.updated.length} ${pluralRu(result.updated.length, ['файл', 'файла', 'файлов'])}, ${result.totalEntries} ${pluralRu(result.totalEntries, ['запись', 'записи', 'записей'])}${delta}.${parked} Перезапустите Zapret, чтобы применить изменения.`,
         style: POWER_ON_BANNER_STYLE
       })
     } catch (e) {
@@ -105,6 +137,33 @@ const ZapretIpListCard: React.FC<Props> = ({ disabled = false, disabledReason, r
       })
     } finally {
       setUpdating(null)
+    }
+  }
+
+  /**
+   * A downloaded IP list is parked in `ipset-all.txt.backup` while IPSet mode
+   * is `none`/`any`. Offer the one click that actually activates it, otherwise
+   * the visible IP counter can never leave "1 диапазон".
+   */
+  const enableLoadedIpSet = async (): Promise<void> => {
+    if (busy || updating || ipsetBusy) return
+    setIpsetBusy(true)
+    const tId = toast.loading('Включаем режим IPSet «По списку»…')
+    try {
+      await zapretSetIpSetMode('loaded')
+      await refresh()
+      toast.success('Режим IPSet: «По списку»', {
+        id: tId,
+        description: 'IP-диапазоны из ipset-all.txt теперь применяются. Перезапустите Zapret.',
+        style: POWER_ON_BANNER_STYLE
+      })
+    } catch (e) {
+      toast.error('Не удалось включить режим «По списку»', {
+        id: tId,
+        description: e instanceof Error ? e.message : String(e)
+      })
+    } finally {
+      setIpsetBusy(false)
     }
   }
 
@@ -180,15 +239,28 @@ const ZapretIpListCard: React.FC<Props> = ({ disabled = false, disabledReason, r
 
   const pickedCount = useMemo(() => picked.size, [picked])
 
+  const summary = listsStatus?.summary
   const hostEntries = useMemo(
     () =>
+      summary?.hostEntries ??
       (listsStatus?.files ?? [])
         .filter((f) => f.id !== 'ipset')
         .reduce((total, f) => total + f.entries, 0),
-    [listsStatus]
+    [listsStatus, summary]
   )
-  const ipsetEntries = useMemo(
-    () => (listsStatus?.files ?? []).find((f) => f.id === 'ipset')?.entries ?? 0,
+  const uniqueHostEntries = summary?.uniqueHostEntries ?? hostEntries
+  const ipsetEntries =
+    summary?.ipsetEntries ??
+    (listsStatus?.files ?? []).find((f) => f.id === 'ipset')?.entries ??
+    0
+  const ipsetBackupEntries = summary?.ipsetBackupEntries ?? 0
+  const ipsetMode = summary?.ipsetMode
+  const ipsetModeLabel = ipsetModeLabelFor(ipsetMode)
+  const fileBreakdown = useMemo(
+    () =>
+      (listsStatus?.files ?? [])
+        .map((file) => `${file.name}: ${file.entries}`)
+        .join('\n'),
     [listsStatus]
   )
   const listsUpdatedAt = useMemo(() => {
@@ -199,7 +271,7 @@ const ZapretIpListCard: React.FC<Props> = ({ disabled = false, disabledReason, r
     return stamps.length ? stamps[stamps.length - 1] : null
   }, [listsStatus])
 
-  const updatesBusy = busy || updating !== null
+  const updatesBusy = busy || updating !== null || ipsetBusy
 
   return (
     <Card>
@@ -208,7 +280,17 @@ const ZapretIpListCard: React.FC<Props> = ({ disabled = false, disabledReason, r
           <CardTitle className="flex items-center gap-2">
             <ListChecks className="h-4 w-4 text-muted-foreground" />
             Список хостов и IP
-            {snapshot && (
+            {listsStatus && (
+              <span
+                className="text-xs font-normal text-muted-foreground"
+                title={fileBreakdown || undefined}
+              >
+                {hostEntries} {pluralRu(hostEntries, ['хост', 'хоста', 'хостов'])} ·{' '}
+                {ipsetEntries} {pluralRu(ipsetEntries, ['диапазон', 'диапазона', 'диапазонов'])} IP
+                {updating && <Loader2 className="ml-1.5 inline h-3 w-3 animate-spin" />}
+              </span>
+            )}
+            {!listsStatus && snapshot && (
               <span className="text-xs font-normal text-muted-foreground">
                 {snapshot.total} запис{endingFor(snapshot.total)} в list-general.txt
               </span>
@@ -253,10 +335,44 @@ const ZapretIpListCard: React.FC<Props> = ({ disabled = false, disabledReason, r
                         <code className="text-[11px]">.backup</code>.
                       </p>
                       <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
-                        <span>Хосты: {hostEntries} записей</span>
-                        <span>IP: {ipsetEntries} диапазонов</span>
+                        <span>
+                          Хосты: {hostEntries} записей
+                          {uniqueHostEntries !== hostEntries
+                            ? ` (уникальных ${uniqueHostEntries})`
+                            : ''}
+                        </span>
+                        <span>
+                          IP: {ipsetEntries}{' '}
+                          {pluralRu(ipsetEntries, ['диапазон', 'диапазона', 'диапазонов'])}
+                          {ipsetMode ? ` (режим «${ipsetModeLabel}»)` : ''}
+                        </span>
+                        {ipsetBackupEntries > 0 && (
+                          <span>в резервной копии: {ipsetBackupEntries}</span>
+                        )}
                         {listsUpdatedAt && <span>Файлы от: {formatWhen(listsUpdatedAt)}</span>}
+                        {updating && <span className="text-primary">обновляем…</span>}
                       </div>
+                      {ipsetMode && ipsetMode !== 'loaded' && (
+                        <div className="mt-2 flex flex-wrap items-center justify-between gap-2 rounded-md border border-amber-500/30 bg-amber-500/5 px-2 py-1.5">
+                          <span className="text-[11px] leading-relaxed text-muted-foreground">
+                            Режим IPSet «{ipsetModeLabel}»: скачанный IP-список сохраняется в
+                            резервную копию и не применяется, пока не включён «По списку».
+                          </span>
+                          {ipsetBackupEntries > 0 && (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => { void enableLoadedIpSet() }}
+                              disabled={disabled || updatesBusy}
+                            >
+                              {ipsetBusy
+                                ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                : <ShieldCheck className="h-3.5 w-3.5" />}
+                              Включить «По списку»
+                            </Button>
+                          )}
+                        </div>
+                      )}
                     </div>
                     <div className="flex shrink-0 flex-wrap gap-2">
                       <Button

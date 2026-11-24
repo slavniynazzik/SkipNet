@@ -114,6 +114,13 @@ const IPSET_SPEC: ListSpec = {
 
 const ALL_SPECS = [...HOST_SPECS, IPSET_SPEC]
 
+/** Host lists Zapret loads in addition to the managed ones. */
+const USER_HOST_FILES = [
+  'list-general-user.txt',
+  'list-exclude-user.txt',
+  'ipset-exclude-user.txt'
+]
+
 export interface ZapretListFileStatus {
   id: string
   name: string
@@ -125,11 +132,30 @@ export interface ZapretListFileStatus {
   updatedAt?: string
 }
 
+/**
+ * Aggregated numbers for the card header and the update summary.
+ *
+ * `hostEntries` is the sum of the managed host files (what the updater
+ * replaces), while `uniqueHostEntries` also folds in the `*-user.txt` files
+ * and removes duplicates, so the UI never shows two different "host counts"
+ * for the same bundle.
+ */
+export interface ZapretListsSummary {
+  hostEntries: number
+  uniqueHostEntries: number
+  /** Entries in the active `lists/ipset-all.txt` (may be a placeholder). */
+  ipsetEntries: number
+  /** Entries in `ipset-all.txt.backup` (downloaded while IPSet mode is off). */
+  ipsetBackupEntries: number
+  ipsetMode: IpSetMode
+}
+
 export interface ZapretListsStatus {
   dir: string
   available: boolean
   source: string
   files: ZapretListFileStatus[]
+  summary: ZapretListsSummary
 }
 
 export interface ZapretListsUpdateResult {
@@ -180,6 +206,44 @@ function countEntries(raw: string, validate: (line: string) => boolean): number 
   return total
 }
 
+function uniqueEntries(rawTexts: string[], validate: (line: string) => boolean): number {
+  const seen = new Set<string>()
+  for (const raw of rawTexts) {
+    for (const line of raw.split(/\r?\n/)) {
+      if (!validate(line)) continue
+      seen.add(line.trim().toLowerCase())
+    }
+  }
+  return seen.size
+}
+
+/**
+ * Pure aggregation used by `getZapretListsStatus` and the unit suite: the
+ * caller supplies the file contents, so counting does not need Electron or a
+ * real bundle on disk.
+ */
+export function summarizeZapretLists(input: {
+  hostTexts: string[]
+  userHostTexts: string[]
+  ipsetText: string
+  ipsetBackupText: string
+  ipsetMode: IpSetMode
+}): ZapretListsSummary {
+  return {
+    hostEntries: input.hostTexts.reduce(
+      (total, raw) => total + countEntries(raw, isValidListEntry),
+      0
+    ),
+    uniqueHostEntries: uniqueEntries(
+      [...input.hostTexts, ...input.userHostTexts],
+      isValidListEntry
+    ),
+    ipsetEntries: countEntries(input.ipsetText, isValidCidrEntry),
+    ipsetBackupEntries: countEntries(input.ipsetBackupText, isValidCidrEntry),
+    ipsetMode: input.ipsetMode
+  }
+}
+
 export function getZapretListsStatus(): ZapretListsStatus {
   const dir = listsDir()
   const available = existsSync(path.join(zapretBundleDir(), 'general.bat'))
@@ -204,7 +268,17 @@ export function getZapretListsStatus(): ZapretListsStatus {
       updatedAt
     }
   })
-  return { dir, available, source: upstreamBase(), files }
+  const ipsetFile = path.join(dir, IPSET_SPEC.file)
+  const summary = summarizeZapretLists({
+    hostTexts: files
+      .filter((file) => file.id !== IPSET_SPEC.id)
+      .map((file) => readText(file.path)),
+    userHostTexts: USER_HOST_FILES.map((name) => readText(path.join(dir, name))),
+    ipsetText: readText(ipsetFile),
+    ipsetBackupText: readText(backupPath(ipsetFile)),
+    ipsetMode: getIpSetModeStatus().mode
+  })
+  return { dir, available, source: upstreamBase(), files, summary }
 }
 
 function backupPath(file: string): string {
