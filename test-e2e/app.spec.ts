@@ -230,6 +230,8 @@ test.describe.serial('SkipNet renderer smoke', () => {
     // count depends on the machine's real hosts file, so hard-coding the
     // singular form made the test flaky.
     await expect(target.getByText(/в hosts$/).first()).toBeVisible()
+    // The catalog ships the Roblox covers preset; it must reach the renderer.
+    await expect(target.getByText('Roblox (обложки)').first()).toBeVisible()
 
     // Section headers render "<enabled> из <total>". The catalog is read-only
     // here: no toggle, apply, refresh or host-file button is clicked.
